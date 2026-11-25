@@ -16,7 +16,9 @@ These tests pin:
 
 from __future__ import annotations
 
+import gc
 import json
+import warnings
 from typing import Any
 
 import pytest
@@ -250,3 +252,38 @@ async def test_the_broker_survives_a_malformed_frame_without_a_dlq() -> None:
     # No exception, and the broker is still usable.
     await broker._handle_sse_event("tick", json.dumps({"tick": 5}))
     assert broker.status.events_received == 1
+
+
+async def test_a_missing_client_method_strands_no_coroutine() -> None:
+    """A failing attribute lookup must not abandon the other reads.
+
+    The eight reads are gathered together, and their client methods are
+    looked up *before* the gather. If one lookup raises, the coroutines
+    already built would never be awaited -- a leaked coroutine and a
+    RuntimeWarning at GC time.
+
+    The attribute lookups now happen before any coroutine is constructed,
+    so a failing lookup cannot strand anything.
+    """
+    settings = Settings(
+        simulator_base_url="http://fake", redis_url="",
+        poll_interval=60.0, watchdog_interval=60.0,
+    )
+    broker = EventBroker(_NullUpstream(), _NullState(), settings, dlq=None)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(AttributeError):
+            await broker._fetch_snapshot()
+        # Force the GC that would report the dangling coroutine.
+        gc.collect()
+
+    unawaited = [
+        w for w in caught
+        if issubclass(w.category, RuntimeWarning)
+        and "never awaited" in str(w.message)
+    ]
+    assert unawaited == [], (
+        "a read coroutine was stranded: "
+        f"{[str(w.message) for w in unawaited]}"
+    )

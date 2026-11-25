@@ -18,6 +18,7 @@ import type {
   Health,
   Incident,
   Metrics,
+  Observability,
   OptimizeResponse,
   Route,
   Station,
@@ -100,6 +101,14 @@ export const api = {
   health: () => request<Health>('/api/health'),
   streamHealth: () => request<BrokerHealth>('/api/stream-health'),
   metrics: () => request<Metrics>('/api/metrics'),
+  /**
+   * The observability payload — the JSON mirror of the Prometheus
+   * exposition. The console reads this rather than parsing `/metrics`:
+   * a text format parsed in the browser would put a number-parsing bug
+   * inside the guarantee that every figure on screen came from the
+   * backend.
+   */
+  observability: () => request<Observability>('/api/observability'),
   depots: () => request<{ status: string; tick: number; depots: Depot[] }>('/api/depots'),
   stations: () => request<{ status: string; tick: number; stations: Station[] }>('/api/stations'),
   routes: () => request<{ status: string; tick: number; routes: Route[] }>('/api/routes'),

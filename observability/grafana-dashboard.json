@@ -1,0 +1,541 @@
+{
+  "uid": "buetcsefest-platform",
+  "title": "Fuel Supply Intelligence — Platform Observability",
+  "description": "The four observability layers PDF §15 names: application, system, intelligence and resilience. Every panel reads the backend's own Prometheus exposition at /metrics.",
+  "tags": ["buetcsefest", "fuel-supply", "observability"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": { "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"] },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "buetcsefest-prometheus" },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Application — request rate, latency, error rate, availability",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "collapsed": false
+    },
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request rate (by route)",
+      "description": "The HTTP request counter, by route template — one series per endpoint, not per id.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (path) (rate(backend_http_requests_total[1m]))",
+          "legendFormat": "{{path}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Latency percentiles (p50 / p95 / p99)",
+      "description": "Computed from the request-duration histogram, pooled over every route. The p95 is the figure PDF §16 asks for.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum(rate(backend_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum(rate(backend_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum(rate(backend_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Error rate (5xx share)",
+      "description": "The error rate PDF §16 asks for, as a fraction of all requests.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(backend_http_requests_total{status=~\"5..\"}[1m])) / clamp_min(sum(rate(backend_http_requests_total[1m])), 0.001)",
+          "legendFormat": "error rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Service availability (uptime)",
+      "description": "One series per scrape target. A gap means the backend was not answering.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"backend\"}",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Upstream calls (by outcome)",
+      "description": "Every call the backend makes to the simulator, by outcome. 'timeout' and 'transport_error' are the outcomes that trip the breaker.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(backend_upstream_requests_total[1m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "System — CPU, memory, resource utilisation",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "id": 101,
+      "collapsed": false
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Simulator pool saturation",
+      "description": "THE metric. In-flight world reads against the concurrency limit the backend sets for itself. Above 0.8 the simulator's connection pool is close to saturating — the early-warning signal for the pool wedge that once took this platform down unnoticed.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 17 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "backend_simulator_pool_saturation_ratio",
+          "legendFormat": "saturation"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1.2,
+          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "always" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.5 },
+              { "color": "red", "value": 0.8 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "In-flight reads and queue depth",
+      "description": "Reads currently in flight against the simulator, and callers queued waiting for the semaphore.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 17 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "backend_simulator_inflight_reads",
+          "legendFormat": "in flight"
+        },
+        {
+          "refId": "B",
+          "expr": "backend_simulator_read_queue_depth",
+          "legendFormat": "queued"
+        },
+        {
+          "refId": "C",
+          "expr": "backend_simulator_fetch_concurrency_limit",
+          "legendFormat": "limit"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Intelligence — prediction error, model confidence, shortage alerts, decision frequency, fallback activation",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+      "id": 102,
+      "collapsed": false
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Forecast absolute error (litres)",
+      "description": "The forecast's error against the live demand oracle. The oracle test asserts 60 of 60 exact matches — so this should sit at zero.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 27 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(backend_forecast_abs_error_litres_sum[5m])) / clamp_min(sum(rate(backend_forecast_abs_error_litres_count[5m])), 0.001)",
+          "legendFormat": "mean error"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Forecast validation verdicts",
+      "description": "EXACT, MISMATCH or UNAVAILABLE — how the forecast compares to the oracle.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 27 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (verdict) (rate(backend_forecast_validation_total[5m]))",
+          "legendFormat": "{{verdict}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Shortage alerts (by severity)",
+      "description": "Stockout risks and shortage alerts raised, by severity.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 27 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (severity) (rate(backend_shortage_alerts_total[5m]))",
+          "legendFormat": "{{severity}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Decision frequency",
+      "description": "How often the operator asked for a plan, dispatched, or cancelled — counted whether accepted or rejected, because a run of rejections is itself a finding.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(backend_decisions_total[5m]))",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Fallback activations",
+      "description": "PDF §15 names fallback activation explicitly. A non-zero count is not an error — it is the record of the system choosing to serve a degraded answer rather than no answer at all.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(backend_fallback_activations_total[5m]))",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Resilience — circuit breaker, stream, snapshot, dead-letter queue",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 },
+      "id": 103,
+      "collapsed": false
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Circuit breaker state",
+      "description": "0 = CLOSED (healthy), 1 = HALF_OPEN (probing), 2 = OPEN (upstream abandoned). The gauge is an integer because a Prometheus gauge cannot carry a string.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "backend_circuit_state",
+          "legendFormat": "state"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 2,
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "CLOSED", "color": "green", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "HALF_OPEN", "color": "orange", "index": 1 } } },
+            { "type": "value", "options": { "2": { "text": "OPEN", "color": "red", "index": 2 } } }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Circuit transitions and rejections",
+      "description": "A breaker that flaps is a system that is not really healthy.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (to_state) (increase(backend_circuit_transitions_total[15m]))",
+          "legendFormat": "→ {{to_state}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(backend_circuit_rejections_total[15m]))",
+          "legendFormat": "rejections"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "SSE events received",
+      "description": "The simulator's event stream. A flat line while the world advances is a silent drop — which the watchdog also counts.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(backend_sse_events_total[1m]))",
+          "legendFormat": "events/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Broker health",
+      "description": "Suspected drops and probe failures — the two counters that say the event stream is lying.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(backend_broker_suspected_drops_total[15m])",
+          "legendFormat": "suspected drops"
+        },
+        {
+          "refId": "B",
+          "expr": "increase(backend_broker_probe_failures_total[15m])",
+          "legendFormat": "probe failures"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Snapshot age (seconds)",
+      "description": "How old the cached world is. A snapshot that stops advancing means the backend is not reading the simulator.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 49 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "backend_snapshot_age_seconds",
+          "legendFormat": "age"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Snapshot refreshes (by result)",
+      "description": "World snapshot refreshes, by result. 'error' here is the first sign of an upstream problem, before the breaker trips.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 49 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(backend_snapshot_refresh_total[1m]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Dead-letter queue",
+      "description": "Payloads the backend could not use. A non-empty queue means the simulator and the backend disagree about a contract.",
+      "datasource": { "type": "prometheus", "uid": "$datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 49 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "backend_dlq_size",
+          "legendFormat": "size"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (reason) (rate(backend_dlq_messages_total[5m]))",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "name": "Circuit opened",
+        "datasource": { "type": "prometheus", "uid": "$datasource" },
+        "enable": true,
+        "iconColor": "red",
+        "expr": "backend_circuit_state == 2",
+        "titleFormat": "Circuit breaker OPEN"
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+# Grafana's provisioning and dashboard, baked in.
+#
+# Same reason as the Prometheus config: a bind-mount cannot be used on this
+# project's path. Grafana's provisioning system reads two kinds of file:
+#
+#   * a *datasource* file, telling Grafana where Prometheus is;
+#   * a *dashboard* file, telling Grafana which dashboard to load.
+#
+# The dashboard JSON is the artefact PDF §20 item 8 asks for — the
+# observability evidence, as something a judge can open.
+
+FROM grafana/grafana:11.2.0
+
+COPY grafana-provisioning/ /etc/grafana/provisioning/
+COPY grafana-dashboard.json /var/lib/grafana/dashboards/buetcsefest.json

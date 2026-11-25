@@ -1,0 +1,39 @@
+# The scrape configuration for the backend's Prometheus exposition.
+#
+# The backend serves the exposition at a **bare** `/metrics` — no `/api`
+# prefix. That path is deliberate: `/api/metrics` already exists and returns
+# the simulator's *business* KPIs as JSON for the console. Two endpoints, two
+# audiences, two formats.
+#
+# The scrape interval is 5 seconds, matching the backend's own poll interval.
+# A tighter interval would sample the same request counters twice without
+# learning anything new; a looser one would blur the pool-saturation spikes
+# that this whole stack exists to catch.
+
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 5s
+  external_labels:
+    stack: buetcsefest
+    layer: backend
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # The backend. This is the only target: the platform's own instrumentation
+  # is the observability surface, and the simulator is the organizers' image
+  # and is not ours to instrument.
+  #
+  # The JSON mirror at `/api/observability` is deliberately *not* scraped.
+  # It is JSON, and a Prometheus scraper parses the text exposition format —
+  # pointing a job at it produces a permanently-red target that looks like a
+  # fault but is not one. The mirror is the console's endpoint; the
+  # exposition is the scraper's.
+  - job_name: backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8002"]
+        labels:
+          service: fuel-supply-intelligence

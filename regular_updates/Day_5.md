@@ -498,7 +498,7 @@ LIVE_BACKEND=http://localhost:8002 npm test
 | **Operator dashboard frontend** | ✅ **Complete — 5th service, live-verified, no-invented-numbers enforced** |
 | **Console redesign** | ✅ **Complete — one column, one hero, one panel at a time; light + dark theme** |
 | **End-to-end verification + documentation** | ✅ **Complete — 49/49, 338 backend, 132 frontend** |
-| Observability (Prometheus / Grafana) & load testing | ⬜ Not started |
+| Observability (Prometheus / Grafana) & load testing | ✅ **Complete — see `regular_updates/Day_6.md`** |
 
 ---
 

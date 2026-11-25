@@ -23,6 +23,7 @@ import { ForecastPanel } from '../components/ForecastPanel'
 import { DepotPanel, RoutePanel, StationPanel } from '../components/NetworkPanel'
 import { StaleBanner } from '../components/TelemetryBar'
 import { StatusBar } from '../components/StatusBar'
+import { SystemPanel } from '../components/SystemPanel'
 import {
   anomalies,
   broker,
@@ -30,6 +31,7 @@ import {
   forecast,
   incidents,
   metrics,
+  observability,
   plan,
   routes,
   stations,
@@ -240,8 +242,54 @@ describe('IncidentPanel', () => {
   })
 })
 
-describe('DetailTabs', () => {
-  it('shows one panel at a time', async () => {
+describe('SystemPanel', () => {
+  it('renders the §16 component table in the brief’s order', () => {
+    render(<SystemPanel observability={observability} />)
+    expect(screen.getByText('Backend API')).toBeInTheDocument()
+    expect(screen.getByText('Database')).toBeInTheDocument()
+    expect(screen.getByText('Fuel Simulator')).toBeInTheDocument()
+    expect(screen.getByText('Prediction Service')).toBeInTheDocument()
+    expect(screen.getByText('Decision Engine')).toBeInTheDocument()
+  })
+
+  it('shows the p95 latency and the error rate the backend computed', () => {
+    render(<SystemPanel observability={observability} />)
+    // The fixture's p95 is 0.02425 s and the error rate is 0.
+    expect(screen.getByText('24 ms')).toBeInTheDocument()
+    expect(screen.getByText('0.00%')).toBeInTheDocument()
+  })
+
+  it('shows the circuit state', () => {
+    render(<SystemPanel observability={observability} />)
+    expect(screen.getByText(/circuit closed/i)).toBeInTheDocument()
+  })
+
+  it('shows the pool saturation as a percentage with its read limit', () => {
+    render(<SystemPanel observability={observability} />)
+    // The fixture's saturation gauge is 0.25 and the limit is 4.
+    expect(screen.getByText('25%')).toBeInTheDocument()
+    expect(screen.getByText(/4 read limit/)).toBeInTheDocument()
+  })
+
+  it('shows a degraded component as degraded', () => {
+    const degraded = {
+      ...observability,
+      components: {
+        ...observability.components,
+        fuel_simulator: { state: 'DEGRADED' },
+      },
+    }
+    render(<SystemPanel observability={degraded} />)
+    expect(screen.getAllByText('DEGRADED').length).toBeGreaterThan(0)
+  })
+
+  it('says so plainly when there is no observability payload', () => {
+    render(<SystemPanel observability={null} />)
+    expect(screen.getByText('No observability data yet')).toBeInTheDocument()
+  })
+})
+
+describe('DetailTabs', () => {  it('shows one panel at a time', async () => {
     render(
       <DetailTabs
         tabs={[

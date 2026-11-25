@@ -22,7 +22,30 @@ ENV VITE_BACKEND_ORIGIN=/api
 RUN npm run build
 
 # ---------------------------------------------------------------------------
-# Stage 2 — serve
+# Stage 2 — test
+#
+# The suite needs the toolchain and the source, so it cannot run in the
+# runtime stage (which carries neither). This stage is a *build target*, not
+# a service: the runtime image stays slim, and the tests run in exactly the
+# environment the assets were built in.
+#
+#   docker build --target test -t buetcsefest-frontend-test -f frontend/Dockerfile .
+#   docker run --rm buetcsefest-frontend-test
+#
+# `scripts/verify-all.sh` builds and runs this target, so the harness entry
+# point never depends on the host having Node installed.
+# ---------------------------------------------------------------------------
+FROM build AS test
+
+WORKDIR /app
+
+# The live integration test renders the whole console against a running
+# backend. It skips itself unless LIVE_BACKEND is set, so the default run
+# is the hermetic one.
+CMD ["npm", "test", "--", "--run"]
+
+# ---------------------------------------------------------------------------
+# Stage 3 — serve
 # ---------------------------------------------------------------------------
 FROM node:22-alpine AS runtime
 

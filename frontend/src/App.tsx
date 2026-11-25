@@ -27,6 +27,7 @@ import { DetailTabs } from './components/DetailTabs'
 import type { TabDefinition } from './components/DetailTabs'
 import { ForecastPanel } from './components/ForecastPanel'
 import { DepotPanel, RoutePanel, StationPanel } from './components/NetworkPanel'
+import { SystemPanel } from './components/SystemPanel'
 import { StaleBanner } from './components/TelemetryBar'
 import { StatusBar } from './components/StatusBar'
 import { ErrorBox } from './components/common'
@@ -74,8 +75,22 @@ export default function App() {
           </>
         ),
       },
+      {
+        id: 'system',
+        label: 'System',
+        content: <SystemPanel observability={data.observability} />,
+      },
     ],
-    [data.depots, data.stations, data.routes, data.forecast, data.anomalies, data.incidents, risks],
+    [
+      data.depots,
+      data.stations,
+      data.routes,
+      data.forecast,
+      data.anomalies,
+      data.incidents,
+      data.observability,
+      risks,
+    ],
   )
 
   return (

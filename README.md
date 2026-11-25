@@ -1,10 +1,12 @@
-# BUP Fuel Supply Simulator — Local Verification Harness, Operator Backend & Console
+# BUP Fuel Supply Simulator — Verification Harness, Operator Backend, Console & Observability
 
 A complete, runnable local setup that connects to, interacts with, and verifies
 **every API surface** of the BUP Fuel Supply Simulator
 (`asifmahmoud414/bup-fuel-supply-simulator:1.0.0`), plus the **operator backend**
 that forecasts, optimises and dispatches fuel shipments against it, and the
-**operator console** that puts a human in front of that backend.
+**operator console** that puts a human in front of that backend — with the
+**observability, resilience and load-testing** layer that proves the platform
+is healthy, degrades safely, and knows its own limits.
 
 It consists of:
 
@@ -13,7 +15,7 @@ It consists of:
 | `simulator-api` | `asifmahmoud414/bup-fuel-supply-simulator:1.0.0` | The simulator (the *world*). |
 | `redis` | `redis:alpine` | Cache layer for read snapshots + state tracking. |
 | `client-verifier` | `./verifier` (Python 3.11) | Defensive client + end-to-end verification suite. |
-| `backend` | `./backend` (Python 3.11) | Operator backend: SSE broker + pre-flight validator + optimiser + forecast + anomaly detection + explanation layer. |
+| `backend` | `./backend` (Python 3.11) | Operator backend: SSE broker + pre-flight validator + optimiser + forecast + anomaly detection + explanation layer + circuit breaker + metrics + DLQ. |
 | `frontend` | `./frontend` (Node 22) | Operator console: a focused, tabbed dashboard over the backend's API. |
 
 Plus a defensive async client (`simulator_client.py`), a 49-check
@@ -48,7 +50,10 @@ docker compose exec -T client-verifier \
 docker compose exec -T backend pytest tests/ -q
 
 # 5. Run the console's test suite
-docker compose exec -T frontend npm test
+#    (the console's runtime image is deliberately slim -- no toolchain, no
+#     source -- so the suite runs in the Dockerfile's `test` build target)
+docker build --target test -t buetcsefest-frontend-test -f frontend/Dockerfile .
+docker run --rm buetcsefest-frontend-test
 
 # 6. Open the console
 open http://localhost:8003
@@ -62,6 +67,34 @@ Expected output ends with:
 ```
   ALL 49 CHECKS PASSED
 ```
+
+### Or run everything at once
+
+`./scripts/verify-all.sh` runs all four suites in order and emits **one JSON
+object** — the harness-compatible entry point. Exit code `0` only if everything
+passed.
+
+```bash
+./scripts/verify-all.sh                      # human-readable
+./scripts/verify-all.sh --json out.json      # machine-parseable
+```
+
+### The two operator-facing endpoints
+
+```bash
+# The Prometheus exposition (text/plain) — bare path, no /api prefix
+curl -s http://localhost:8002/metrics
+
+# The JSON mirror the console's System tab reads
+curl -s http://localhost:8002/api/observability
+```
+
+`/api/metrics` is a *third* thing and stays JSON — it is the simulator's
+business KPIs, the console's original contract. The three never drift:
+`/metrics` is Prometheus text, `/api/observability` is the platform's own
+metrics as JSON, `/api/metrics` is the world's business KPIs as JSON.
+
+Full detail: [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
 
 ---
 
@@ -167,17 +200,18 @@ publishes and lets an operator act on the backend's recommendation — with a
 confirmation step, because a dispatch writes to the simulator.
 
 The screen is **one column, one hero, one panel at a time**: a slim status bar,
-a single action card carrying the plan and the dispatch button, and three tabs
-(Network, Forecast, Problems) with everything else one click away behind a
-disclosure. It has a **dark and a light theme**, toggled from the status bar and
-remembered across reloads.
+a single action card carrying the plan and the dispatch button, and four tabs
+(Network, Forecast, Problems, System) with everything else one click away
+behind a disclosure. It has a **dark and a light theme**, toggled from the
+status bar and remembered across reloads.
 
 ```bash
 # The console (serves the built assets and proxies /api to the backend)
 open http://localhost:8003
 
-# The console's own test suite
-docker compose exec -T frontend npm test
+# The console's own test suite, in the Dockerfile's `test` build target
+docker build --target test -t buetcsefest-frontend-test -f frontend/Dockerfile .
+docker run --rm buetcsefest-frontend-test
 
 # The live integration test — renders the whole console against the running backend
 cd frontend && LIVE_BACKEND=http://localhost:8002 npm test
@@ -205,6 +239,90 @@ Three other properties are worth stating:
    nothing; the second confirms it.
 
 Full detail: [`docs/DASHBOARD.md`](docs/DASHBOARD.md).
+
+---
+
+## 1e. Observability & resilience
+
+The platform reports on its own health while it works, and refuses work it
+cannot do safely.
+
+### The metrics
+
+`GET /metrics` — a hand-rolled Prometheus exposition, ~400 lines, **zero new
+dependencies**. It covers the four layers PDF §15 names:
+
+| Layer | The signal that matters |
+| :--- | :--- |
+| **Application** | request rate, latency histogram (p50/p95/p99), error rate, availability |
+| **System** | in-flight simulator reads, the read limit, **pool saturation**, queue depth |
+| **Intelligence** | forecast error, forecast verdicts, shortage alerts, decision frequency, **fallback activations** |
+| **Resilience** | circuit state, circuit transitions and rejections, broker mode, suspected SSE drops, snapshot age, DLQ size |
+
+The labels use the **route template**, never the raw path — otherwise
+`/api/stations/station-mirpur` and `/api/stations/station-tongi` become two
+time series and the metric's cardinality explodes.
+
+### The health table
+
+`GET /api/health` carries PDF §16's table verbatim — Backend API, Database,
+Fuel Simulator, Prediction Service, Decision Engine — plus p95 latency, error
+rate, the circuit state and the broker state. It **always returns HTTP 200**:
+the container healthcheck must never kill the backend at the moment it should
+be serving the cached world.
+
+### The circuit breaker
+
+A breaker wraps the simulator client (it never edits it — the client must stay
+byte-identical to the verifier's reference copy). It converts a **13.75-second
+retry stall into a 1-millisecond rejection**.
+
+Only *retryable* failures trip it. A 409 from the simulator is a **business
+answer**, not an outage — tripping on it would take the whole backend down for
+one bad request.
+
+**Reads degrade; writes refuse.**
+
+| | Behaviour when the breaker is OPEN |
+| :--- | :--- |
+| `GET /api/state` | **200** with the last known good world and `degraded: true` |
+| `POST /api/plan` | **503** `CIRCUIT_OPEN` — a plan against a stale world would be a *wrong* plan |
+
+### Prove it, live
+
+```bash
+# Break the upstream
+curl -s -X POST http://localhost:8000/admin/faults \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"unavailable","duration_seconds":60}'
+
+sleep 20
+curl -s http://localhost:8002/api/health    # status: "degraded", circuit: OPEN
+curl -s http://localhost:8002/api/state     # 200, degraded: true
+curl -s http://localhost:8002/metrics | grep backend_circuit_state   # 2.0
+
+# Restore it — the breaker closes on its own, nothing polls, nothing nudges
+curl -s -X POST http://localhost:8000/admin/faults/clear
+```
+
+Full detail: [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md),
+[`docs/RESILIENCE.md`](docs/RESILIENCE.md).
+
+### The monitoring stack — opt-in
+
+Prometheus and Grafana live behind a **compose overlay**, not in the default
+stack. `docker compose up -d` still yields exactly **five** healthy services.
+
+```bash
+docker compose -f docker-compose.yml -f observability/compose.monitoring.yml up -d
+# Prometheus: http://localhost:9090    Grafana: http://localhost:3000
+```
+
+Nine alert rules ship with it — pool saturation, circuit open, high latency,
+high error rate, suspected SSE drops, a non-empty DLQ and more. The Grafana
+dashboard is provisioned automatically, with one row per §15 layer.
+
+Full detail: [`observability/README.md`](observability/README.md).
 
 ---
 
@@ -350,6 +468,69 @@ Two rules that will save you a debugging session:
   live at tick N.
 - **Reset the world before you test.** The baseline is well-stocked for its
   first ~60 ticks, so an empty plan early on is *correct*, not a bug.
+
+### 2.6 The load test
+
+Three named workloads, measured. **k6** is the primary tool; a **stdlib-only
+Python harness** is the fallback, and both emit the **same JSON schema**, so
+the report is reproducible on a machine that has neither.
+
+```bash
+./loadtest/run.sh --duration 60 --vus 20       # picks k6 if present
+./loadtest/run.sh --duration 60 --vus 20 --python  # force the fallback
+```
+
+The report lands in `loadtest/results/<timestamp>.json`:
+
+```json
+{
+  "schema_version": 1,
+  "started_at": "...", "duration_seconds": 60, "vus": 20,
+  "scenarios": [
+    {"name": "W1-decision", "requests": 1377, "error_rate": 0.0,
+     "latency_ms": {"avg": 209.0, "p50": 202.3, "p95": 249.3, "p99": 269.3},
+     "throughput_rps": 45.5,
+     "resource": {"cpu_pct": 0.47, "mem_mb": 51.5}}
+  ],
+  "backend_metrics_snapshot": {"pool_saturation_peak": 1.0, "circuit_state": "CLOSED"}
+}
+```
+
+The `backend_metrics_snapshot` is the point: the report reads the backend's
+own `/metrics` before and after the run, so the numbers tie request latency to
+**simulator pool saturation**. That is the finding PDF §18 is asking for —
+understanding the system's limits, not a benchmark number.
+
+Measured results and their interpretation:
+[`docs/LOAD_TEST.md`](docs/LOAD_TEST.md).
+
+### 2.7 The one command
+
+```bash
+./scripts/verify-all.sh                      # human-readable
+./scripts/verify-all.sh --json out.json      # machine-parseable
+```
+
+It runs, in order: the **49-check verifier suite**, the **backend pytest
+suite**, the **frontend test suite**, the **load test**, and the
+**observability self-check** (which asserts every required metric family is
+present and that `/api/health` carries §16's fields). Output is one JSON
+object with per-suite pass/fail, counts and durations. Exit code `0` only if
+everything passed.
+
+### 2.8 The demo
+
+Two scripts run the whole 14-beat story, so the demo is repeatable and never
+memorised. Each beat prints the exact command **and** the output a judge
+should see, then runs it.
+
+```bash
+./scripts/demo-normal.sh                    # beats 1–8
+./scripts/demo-crisis-fault-recovery.sh     # beats 9–14
+./scripts/demo-normal.sh --narrate          # print the commands only
+```
+
+Full detail: [`docs/DEMO.md`](docs/DEMO.md).
 
 ---
 
@@ -587,6 +768,18 @@ SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose
 > a live world, start the stack as above and then run
 > `curl -X POST http://localhost:8000/admin/run`.
 
+The **backend** reads its own settings from the environment too:
+
+| Variable | Default | Meaning |
+| :--- | :--- | :--- |
+| `BREAKER_FAILURE_THRESHOLD` | `5` | Consecutive *retryable* failures that open the circuit. |
+| `BREAKER_COOLDOWN_SECONDS` | `15.0` | How long the breaker waits before probing the upstream. |
+| `SCENARIO_PATH` | `backend/scenarios/baseline.yaml` | Which scenario configuration to load. |
+
+A **terminal** failure — a 404, 409 or 422 from the simulator — never counts
+toward the threshold. Those are the simulator *answering*, not the simulator
+failing, and tripping on them would take the backend down for one bad request.
+
 ---
 
 ## 5. Files
@@ -598,8 +791,14 @@ SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose
 ├── docs/
 │   ├── BACKEND.md                 # backend API contract, validator rules, measured semantics
 │   │                              #   + Part II: optimiser, forecast, anomalies, explanation
-│   │                              #   + Part III: the connection-pool incident and its fix
+│   │                              #   + Part III: observability, resilience, scenario config
 │   ├── DASHBOARD.md               # the operator console: architecture, invariant, panels
+│   ├── ARCHITECTURE.md            # the as-built diagram (PDF §20 item 6)
+│   ├── OBSERVABILITY.md           # the metric catalogue, the health table, the §15 layers
+│   ├── RESILIENCE.md              # the breaker's state machine, the degraded-mode contract
+│   ├── LOAD_TEST.md               # the workloads, the measured results, their interpretation
+│   ├── SCENARIO.md                # the scenario configuration schema
+│   ├── DEMO.md                    # the 14-beat live demo script
 │   ├── BRIEF.md
 │   ├── SYSTEM_DESIGN.md
 │   └── system_understanding_and_requirements.md
@@ -608,7 +807,25 @@ SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose
 │   ├── Day_2.md                   # 49-check verification suite
 │   ├── Day_3.md                   # operator backend + validator
 │   ├── Day_4.md                   # optimiser + forecast + anomalies + explanation
-│   └── Day_5.md                   # operator console + the connection-pool incident
+│   ├── Day_5.md                   # operator console + the connection-pool incident
+│   └── Day_6.md                   # observability + resilience + load testing
+├── scripts/
+│   ├── verify-all.sh              # THE one command — four suites, one JSON verdict
+│   ├── check_observability.py     # asserts every required metric family is present
+│   ├── demo-normal.sh             # demo beats 1–8
+│   └── demo-crisis-fault-recovery.sh  # demo beats 9–14
+├── loadtest/
+│   ├── run.sh                     # picks k6, falls back to the Python harness
+│   ├── harness.py                 # stdlib-only fallback runner (same JSON schema)
+│   ├── k6/                        # decision.js, dashboard.js, console-mix.js
+│   └── results/                   # the committed reports
+├── observability/                 # the OPT-IN monitoring overlay (not a default service)
+│   ├── compose.monitoring.yml     # Prometheus + Grafana, one command away
+│   ├── prometheus.yml             # the scrape config
+│   ├── prometheus-alerts.yml      # nine alert rules
+│   ├── grafana-dashboard.json     # one row per §15 layer
+│   ├── grafana-provisioning/      # datasource + dashboard providers
+│   └── README.md
 ├── verifier/
 │   ├── Dockerfile                 # python:3.11-slim, deps first, healthcheck
 │   ├── requirements.txt           # fastapi, httpx, pydantic, redis, pytest
@@ -618,6 +835,8 @@ SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose
 └── backend/
     ├── Dockerfile                 # python:3.11-slim, deps first, healthcheck
     ├── requirements.txt           # fastapi, uvicorn, httpx, pydantic, redis, pytest
+    ├── scenarios/
+    │   └── baseline.yaml          # the scenario configuration — validated at boot
     ├── app/
     │   ├── main.py                # FastAPI app, lifespan, router wiring
     │   ├── broker.py              # SSE broker: fan-out, watchdog, probe, polling fallback
@@ -635,6 +854,10 @@ SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose
     │   ├── errors.py              # simulator exception -> HTTP mapping
     │   ├── keys.py                # deterministic idempotency keys (+ make_key_at)
     │   ├── journal.py             # write-ahead dispatch journal + dispatch_plans
+    │   ├── circuit_breaker.py     # the breaker + the degraded-mode contract
+    │   ├── metrics.py             # the Prometheus writer + the HTTP middleware
+    │   ├── dlq.py                 # the dead-letter queue
+    │   ├── scenario.py            # the scenario loader + the boot-time validator
     │   ├── simulator_client.py    # byte-identical copy of verifier/simulator_client.py
     │   └── routers/
     │       ├── health.py          # /api/health, /api/stream-health
@@ -643,7 +866,8 @@ SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose
     │       ├── allocations.py     # /api/plan, /api/allocations, .../cancel, .../explain
     │       ├── optimizer.py       # /api/optimize, .../execute, .../solver, .../llm
     │       ├── forecast.py        # /api/forecast, .../summary, .../{id}, .../validate
-    │       └── anomaly.py         # /api/anomalies, /api/incidents, .../explain
+    │       ├── anomaly.py         # /api/anomalies, /api/incidents, .../explain
+    │       └── observability.py   # /metrics, /api/observability, /api/dlq
     └── tests/
         ├── test_validator.py                      # pure unit tests, no simulator
         ├── test_validator_against_simulator.py   # oracle + randomised differential test
@@ -661,6 +885,12 @@ SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose
         ├── test_explain.py                        # determinism + "every number is declared"
         ├── test_llm_isolation.py                  # AST import-graph guard
         ├── test_lp_solver.py                      # import guard, fallback, LP-vs-greedy
+        ├── test_circuit_breaker.py                # the state machine + degraded mode
+        ├── test_metrics.py                        # the exposition format + the metric families
+        ├── test_pool_saturation.py                # the semaphore bound is never exceeded
+        ├── test_dlq.py                            # a bad frame is quarantined, not raised
+        ├── test_scenario_config.py                # the YAML loads, validates, changes nothing
+        ├── test_observability_api.py              # the §16 table on /api/health
         └── fixtures/
             └── demand_golden.json                 # 60-row live golden fixture
 └── frontend/
@@ -687,7 +917,8 @@ SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose
     │   │   ├── TelemetryBar.tsx   # StaleBanner (the freshness contract)
     │   │   ├── NetworkPanel.tsx   # DepotPanel, StationPanel, RoutePanel
     │   │   ├── ForecastPanel.tsx  # the merged forecast tab
-    │   │   └── AnomalyPanel.tsx   # AnomalyPanel, IncidentPanel
+    │   │   ├── AnomalyPanel.tsx   # AnomalyPanel, IncidentPanel
+    │   │   └── SystemPanel.tsx    # the §16 health table + the pool-saturation meter
     │   └── test/
     │       ├── derive.test.ts             # the pure derivations
     │       ├── format.test.ts             # the formatting
@@ -716,3 +947,28 @@ SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose
 | `simulator-api` is `healthy` but every request hangs | The simulator's connection pool is exhausted. `docker compose restart simulator-api` clears it; `docs/BACKEND.md` §18 explains the cause and the fix. |
 | The console shows "Upstream unreachable" | The backend cannot reach the simulator. Check `curl localhost:8002/api/health` — its `upstream.reachable` field says why. |
 | The console's live test times out | The backend is slow or the simulator is wedged. Check `docker compose ps` first. |
+| `/api/health` says `degraded` and `circuit.state` is `OPEN` | The breaker tripped. It closes on its own after `BREAKER_COOLDOWN_SECONDS`. If the upstream is genuinely down, check `curl localhost:8000/v1/health`. |
+| `POST /api/plan` returns `503 CIRCUIT_OPEN` | **Working as designed.** The write path refuses to plan against a stale world; reads still serve the last known good snapshot with `degraded: true`. See `docs/RESILIENCE.md`. |
+| `curl /metrics` returns JSON, not Prometheus text | You asked for `/api/observability` or `/api/metrics`. `/metrics` is the bare path and returns `text/plain; version=0.0.4`. |
+| Prometheus shows the backend target `down` | The scrape config expects the service name `backend` on port 8002. Start the overlay with the default compose file so the network name matches: `docker compose -f docker-compose.yml -f observability/compose.monitoring.yml up -d`. |
+| `docker compose build` did not change the running container | `build` does not recreate. Always follow it with `--force-recreate`. |
+| The load test reports 100% errors | The backend was not running, or the breaker was OPEN. Check `curl localhost:8002/api/health` first. |
+
+---
+
+## 7. The documentation set
+
+| Document | What it answers |
+| :--- | :--- |
+| [`docs/BACKEND.md`](docs/BACKEND.md) | Every endpoint, the validator rules, the measured simulator semantics, the metrics, the breaker. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The as-built diagram — PDF §20 item 6. |
+| [`docs/SYSTEM_DESIGN.md`](docs/SYSTEM_DESIGN.md) | The design as built, and an honest list of what is *not* built. |
+| [`docs/DASHBOARD.md`](docs/DASHBOARD.md) | The console: its invariant, its architecture, its panels. |
+| [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | The metric catalogue, the §15 layers, the §16 health table. |
+| [`docs/RESILIENCE.md`](docs/RESILIENCE.md) | The breaker's state machine, the degraded-mode contract, the measured recovery timeline. |
+| [`docs/LOAD_TEST.md`](docs/LOAD_TEST.md) | The workloads, the measured results, and what they say about the system's limits. |
+| [`docs/SCENARIO.md`](docs/SCENARIO.md) | The scenario configuration schema and how to make a new one. |
+| [`docs/DEMO.md`](docs/DEMO.md) | The 14-beat live demo script. |
+| [`docs/BRIEF.md`](docs/BRIEF.md) | What is implemented, what is not, and why — in plain words. |
+| [`docs/TESTING.md`](docs/TESTING.md) | The measured behaviour of every injection surface. |
+| [`observability/README.md`](observability/README.md) | Bringing up Prometheus + Grafana. |

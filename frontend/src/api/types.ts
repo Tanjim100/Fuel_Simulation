@@ -112,6 +112,61 @@ export interface Metrics {
   }
 }
 
+/**
+ * The observability payload — the JSON mirror of the Prometheus exposition.
+ *
+ * The console reads *this*, not `/metrics`. Parsing a Prometheus text
+ * exposition in the browser would put a number-parsing bug inside the
+ * guarantee that every figure on screen came from the backend.
+ */
+export interface Observability {
+  status: string
+  components: Record<string, { state: string }>
+  latency: {
+    p95_seconds: number
+    p50_seconds: number
+    avg_seconds: number
+  }
+  requests: {
+    total: number
+    errors: number
+    error_rate: number
+  }
+  circuit: {
+    state: string
+    consecutive_failures: number
+    opened_at: number | null
+    cooldown_remaining: number
+    total_failures: number
+    total_rejections: number
+    transitions: number
+  }
+  broker: {
+    mode: string
+    events_received: number
+    suspected_drops: number
+    probe_failures: number
+    reconnects: number
+  }
+  upstream: {
+    reachable: boolean
+    error: string | null
+  }
+  snapshot: {
+    tick: number
+    age_seconds: number
+  }
+  dlq: {
+    size: number
+  }
+  metric_families: Record<string, string[]>
+  metrics: {
+    counters: Record<string, Record<string, number>>
+    gauges: Record<string, Record<string, number>>
+    histograms: Record<string, Record<string, number>>
+  }
+}
+
 export interface StockoutRisk {
   station_id: string
   fuel_type: string

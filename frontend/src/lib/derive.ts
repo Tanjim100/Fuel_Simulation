@@ -132,6 +132,51 @@ export function verdictLevel(verdict: string): HealthLevel {
   }
 }
 
+/**
+ * The colour for a component's health state.
+ *
+ * The backend reports each component of the §16 table as one of
+ * `HEALTHY` / `DEGRADED` / `UNHEALTHY` / `UNKNOWN` / `DISABLED`. The
+ * mapping is the console's *display* policy: `UNKNOWN` is deliberately not
+ * `ok`, because an unknown state cannot justify calling a component healthy.
+ */
+export function componentLevel(state: string): HealthLevel {
+  switch (state) {
+    case 'HEALTHY':
+      return 'ok'
+    case 'DEGRADED':
+      return 'warn'
+    case 'UNHEALTHY':
+      return 'danger'
+    case 'DISABLED':
+      return 'dim'
+    case 'UNKNOWN':
+    default:
+      return 'warn'
+  }
+}
+
+/**
+ * The colour for the circuit breaker's state.
+ *
+ * `HALF_OPEN` is a *probe* state: the breaker is trying the upstream. It is
+ * not healthy yet, so it reads as a warning rather than an alarm — the
+ * operator should know the system is attempting recovery.
+ */
+export function circuitLevel(state: string): HealthLevel {
+  switch (state) {
+    case 'CLOSED':
+      return 'ok'
+    case 'HALF_OPEN':
+      return 'warn'
+    case 'OPEN':
+      return 'danger'
+    case 'DISABLED':
+    default:
+      return 'dim'
+  }
+}
+
 /** The colour for a resource status. */
 export function statusLevel(status: string): HealthLevel {
   switch (status) {

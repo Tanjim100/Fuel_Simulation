@@ -1,0 +1,11 @@
+# The Prometheus configuration, baked in.
+#
+# A bind-mount would be the obvious way to do this, but this project's path
+# contains spaces and Docker Desktop cannot mount it — the same constraint
+# that made the base stack bake its code into images. So the two config files
+# are copied into a tiny image derived from the Prometheus base.
+
+FROM prom/prometheus:v2.54.1
+
+COPY prometheus.yml /etc/prometheus/prometheus.yml
+COPY prometheus-alerts.yml /etc/prometheus/alerts.yml

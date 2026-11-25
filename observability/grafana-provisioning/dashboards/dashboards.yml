@@ -1,0 +1,18 @@
+# Which dashboards to load.
+#
+# Grafana loads every dashboard in the folder at boot. There is one
+# dashboard, and it is the §15 four-layer view.
+
+apiVersion: 1
+
+providers:
+  - name: buetcsefest
+    orgId: 1
+    folder: BUET CSE Fest
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

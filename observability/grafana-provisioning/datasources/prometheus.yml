@@ -1,0 +1,17 @@
+# The Prometheus datasource.
+#
+# `uid` is pinned so the dashboard JSON can refer to it by name rather than
+# by whatever Grafana happens to generate.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: buetcsefest-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s

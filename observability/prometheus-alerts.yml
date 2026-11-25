@@ -1,0 +1,167 @@
+# The alert rules.
+#
+# These are the alerts this platform's own history says it needed. Each one
+# corresponds to a failure that actually happened and was *not* visible:
+#
+#   * **SimulatorPoolSaturation** — the simulator's connection pool wedged
+#     behind 15 database handles with every request blocked for 30 seconds.
+#     It was found by reading logs hours later. The saturation ratio is the
+#     signal that would have made it visible in seconds.
+#   * **SimulatorCircuitOpen** — the backend's breaker gave up on an upstream
+#     that had stopped answering. Before the breaker existed, that was a hang
+#     rather than a state.
+#   * **BackendLatencyHigh** — the general "the backend is slow" signal.
+#
+# The thresholds are deliberately conservative. An alert that fires on a
+# healthy system teaches the operator to ignore alerts, which costs more than
+# a missed one.
+
+groups:
+  - name: buetcsefest-backend
+    interval: 5s
+    rules:
+      # ------------------------------------------------------------------ #
+      # The pool wedge                                                     #
+      # ------------------------------------------------------------------ #
+      - alert: SimulatorPoolSaturation
+        # The backend's own demand on the simulator, against the bound it
+        # sets for itself. Above 0.8 the simulator's 15-wide SQLAlchemy pool
+        # is one notch from being the bottleneck.
+        expr: backend_simulator_pool_saturation_ratio > 0.8
+        for: 30s
+        labels:
+          severity: warning
+          layer: system
+        annotations:
+          summary: "Simulator pool saturation above 80%"
+          description: >-
+            The backend's in-flight world reads are at {{ $value | humanizePercentage }}
+            of its concurrency limit. The simulator's connection pool is close
+            to saturating — the failure mode that once wedged this platform
+            unnoticed.
+          runbook: "docs/OBSERVABILITY.md#the-pool-saturation-signal"
+
+      - alert: SimulatorReadQueueBacklog
+        # Callers *waiting* on the semaphore. Zero is healthy; anything
+        # sustained means reads are queueing behind each other.
+        expr: backend_simulator_read_queue_depth > 2
+        for: 30s
+        labels:
+          severity: warning
+          layer: system
+        annotations:
+          summary: "World reads are queueing behind the concurrency limit"
+          description: >-
+            {{ $value }} callers are waiting on the simulator read semaphore.
+            Requests will queue behind them, which shows up as latency before
+            it shows up as an error.
+
+      # ------------------------------------------------------------------ #
+      # The breaker                                                        #
+      # ------------------------------------------------------------------ #
+      - alert: SimulatorCircuitOpen
+        # 2 = OPEN. The gauge encodes the state as an integer because a
+        # Prometheus gauge cannot carry a string.
+        expr: backend_circuit_state == 2
+        for: 10s
+        labels:
+          severity: critical
+          layer: resilience
+        annotations:
+          summary: "The simulator circuit breaker is open"
+          description: >-
+            The backend has stopped calling the simulator. Reads are served
+            from the cached snapshot with degraded=true; writes are refused
+            with CIRCUIT_OPEN.
+
+      - alert: SimulatorCircuitTransition
+        # Every transition is a finding — a breaker that flaps is a system
+        # that is not really healthy.
+        expr: increase(backend_circuit_transitions_total[5m]) > 0
+        labels:
+          severity: info
+          layer: resilience
+        annotations:
+          summary: "The circuit breaker changed state in the last 5 minutes"
+          description: "The breaker moved to {{ $labels.to_state }}."
+
+      # ------------------------------------------------------------------ #
+      # Latency and errors                                                 #
+      # ------------------------------------------------------------------ #
+      - alert: BackendLatencyHigh
+        # The p95 of the pooled request-duration histogram — the same
+        # percentile the console's System tab shows.
+        expr: histogram_quantile(0.95, sum(rate(backend_http_request_duration_seconds_bucket[5m])) by (le)) > 1.0
+        for: 30s
+        labels:
+          severity: warning
+          layer: application
+        annotations:
+          summary: "The backend's p95 latency is above one second"
+          description: >-
+            The p95 request latency is {{ $value | humanizeDuration }}. The
+            backend is answering, but slowly — check the pool saturation
+            gauge before assuming the upstream is at fault.
+
+      - alert: BackendErrorRateHigh
+        # A non-zero error rate on a system whose whole point is dispatching
+        # fuel is worth knowing about immediately.
+        expr: >-
+          sum(rate(backend_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(backend_http_requests_total[5m])), 0.001) > 0.05
+        for: 30s
+        labels:
+          severity: critical
+          layer: application
+        annotations:
+          summary: "The backend's error rate is above 5%"
+          description: >-
+            {{ $value | humanizePercentage }} of requests are failing. The
+            health endpoint stays 200 during a fault — check the component
+            states on the console's System tab.
+
+      # ------------------------------------------------------------------ #
+      # The stream                                                          #
+      # ------------------------------------------------------------------ #
+      - alert: BrokerSuspectedDrops
+        # The simulator's SSE stream silently dropping events is the failure
+        # the watchdog exists to catch, and it is invisible from the outside.
+        expr: increase(backend_broker_suspected_drops_total[10m]) > 0
+        labels:
+          severity: warning
+          layer: resilience
+        annotations:
+          summary: "The broker suspects it missed simulator events"
+          description: >-
+            The watchdog saw the world advance without a matching event. The
+            broker is polling instead, so the console is still correct — but
+            slower.
+
+      - alert: BrokerProbeFailures
+        expr: increase(backend_broker_probe_failures_total[5m]) > 3
+        for: 30s
+        labels:
+          severity: warning
+          layer: resilience
+        annotations:
+          summary: "The SSE reachability probe is failing repeatedly"
+          description: "The broker cannot reach the simulator's event stream."
+
+      # ------------------------------------------------------------------ #
+      # The dead-letter queue                                               #
+      # ------------------------------------------------------------------ #
+      - alert: DeadLetterQueueNotEmpty
+        # A non-empty DLQ means payloads are arriving that the backend
+        # cannot use. One entry is noise; a growing queue is a contract
+        # break between the simulator and the backend.
+        expr: backend_dlq_size > 0
+        for: 60s
+        labels:
+          severity: warning
+          layer: application
+        annotations:
+          summary: "The dead-letter queue is not empty"
+          description: >-
+            {{ $value }} payload(s) the backend could not parse are queued
+            for inspection. The event stream survives them, but they are
+            being dropped.

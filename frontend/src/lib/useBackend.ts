@@ -27,6 +27,7 @@ import type {
   Health,
   Incident,
   Metrics,
+  Observability,
   OptimizeResponse,
   Route,
   Station,
@@ -44,6 +45,7 @@ export interface BackendData {
   forecast: ForecastSummary | null
   anomalies: Anomaly[]
   incidents: Incident[]
+  observability: Observability | null
   plan: OptimizeResponse | null
   execution: ExecuteResponse | null
   loading: boolean
@@ -76,6 +78,7 @@ export function useBackend(): BackendData {
   const [forecast, setForecast] = useState<ForecastSummary | null>(null)
   const [anomalies, setAnomalies] = useState<Anomaly[]>([])
   const [incidents, setIncidents] = useState<Incident[]>([])
+  const [observability, setObservability] = useState<Observability | null>(null)
   const [plan, setPlan] = useState<OptimizeResponse | null>(null)
   const [execution, setExecution] = useState<ExecuteResponse | null>(null)
 
@@ -95,7 +98,7 @@ export function useBackend(): BackendData {
 
     const run = async () => {
       try {
-        const [h, b, m, d, s, r, f, a, i] = await Promise.all([
+        const [h, b, m, d, s, r, f, a, i, o] = await Promise.all([
           api.health(),
           api.streamHealth(),
           api.metrics(),
@@ -105,6 +108,7 @@ export function useBackend(): BackendData {
           api.forecastSummary(),
           api.anomalies(),
           api.incidents(),
+          api.observability(),
         ])
         if (cancelled) return
         setHealth(h)
@@ -116,6 +120,7 @@ export function useBackend(): BackendData {
         setForecast(f)
         setAnomalies(a.anomalies)
         setIncidents(i.incidents)
+        setObservability(o)
         setError(null)
       } catch (err) {
         if (cancelled) return
@@ -253,6 +258,7 @@ export function useBackend(): BackendData {
     forecast,
     anomalies,
     incidents,
+    observability,
     plan,
     execution,
     loading,

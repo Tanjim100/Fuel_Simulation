@@ -444,6 +444,9 @@ All settings are environment-driven (`backend/app/config.py`).
 | `EVENT_BUFFER` | `200` | Retained events for `/api/events/recent` |
 | `SUBSCRIBER_QUEUE` | `64` | Per-subscriber queue depth |
 | `JOURNAL_PATH` | `/app/data/journal.sqlite3` | Write-ahead journal location |
+| `BREAKER_FAILURE_THRESHOLD` | `5` | Consecutive **retryable** failures before the circuit breaker opens. A 409/404/422 is a business answer and never counts — see `docs/RESILIENCE.md`. |
+| `BREAKER_COOLDOWN_SECONDS` | `15.0` | How long the breaker stays OPEN before it allows a single probe. |
+| `SCENARIO_PATH` | `backend/scenarios/baseline.yaml` | The scenario configuration file. In the container: `/app/scenarios/baseline.yaml`. Validated at boot; a broken file stops the backend rather than producing wrong forecasts. See `docs/SCENARIO.md`. |
 
 ---
 
@@ -1247,3 +1250,122 @@ fine when the process is healthy. Under load, when the finaliser is needed
 our side, where the load is generated — and that is also where the bug was.
 
 `verifier/` was not touched. The gate still reads **ALL 49 CHECKS PASSED**.
+
+---
+
+# Part III — Observability, resilience & load testing
+
+## 19. The observability, resilience and scenario surface
+
+Three subsystems were added in the final phase. They are documented in
+their own documents; this section is the index and the API summary.
+
+| Document | What it covers |
+| :--- | :--- |
+| `docs/OBSERVABILITY.md` | The metric catalogue, the §16 health table, the pool-saturation signal, the Prometheus + Grafana overlay. |
+| `docs/RESILIENCE.md` | The circuit breaker's state machine, the failure classification, the degraded-mode contract per endpoint. |
+| `docs/SCENARIO.md` | The scenario configuration schema, the resolution order, how to make a new scenario. |
+| `docs/LOAD_TEST.md` | The workload definition, the report schema, the measured results. |
+| `docs/DEMO.md` | The 14-beat live demonstration script. |
+| `docs/ARCHITECTURE.md` | The as-built diagram and the data flow. |
+
+### 19.1 The new endpoints
+
+| Endpoint | Returns |
+| :--- | :--- |
+| `GET /metrics` | The Prometheus text exposition. **Bare path, no `/api` prefix.** `text/plain; version=0.0.4`. |
+| `GET /api/observability` | The JSON mirror of the exposition, plus the component states and the error rate. The console's System tab reads this. |
+| `GET /api/dlq` | The dead-letter queue's entries, with a count. |
+| `POST /api/dlq/{id}/retry` | Replay one entry through its original handler. |
+| `GET /api/health` | **Extended**, not replaced. The pre-existing keys are preserved; the §16 table is added alongside. |
+
+> **`/metrics` and `/api/metrics` are different endpoints.**
+> `/api/metrics` already existed and returns the simulator's *business* KPIs
+> as JSON for the console. `/metrics` is the backend's own instrumentation in
+> the Prometheus text format, for a scraper. Two audiences, two formats, two
+> paths — and they must not drift.
+
+### 19.2 The circuit breaker
+
+`backend/app/circuit_breaker.py` **wraps** the simulator client rather than
+editing it, because `backend/app/simulator_client.py` must stay
+byte-identical to `verifier/simulator_client.py` (the SHA256 drift guard in
+`tests/test_client_parity.py`).
+
+| Application state | `app.state.client` | `app.state.simulator_client` |
+| :--- | :--- | :--- |
+| Normal | the breaker | the raw client |
+| A call through it | protected by the gate | — |
+| The health probe | **bypasses** the breaker | the raw client |
+
+The health probe deliberately bypasses the gate: an open breaker means *we*
+are not calling the upstream, not that the upstream is down. Probing through
+the gate would report "UNHEALTHY" for a simulator that is answering fine.
+
+**The degraded-mode contract:**
+
+| Endpoint | While the breaker is OPEN |
+| :--- | :--- |
+| `GET /api/state`, `/api/stations`, `/api/depots`, `/api/routes` | **200** with the last known good world, plus `degraded: true` and `degraded_reason`. |
+| `GET /api/health` | **200** with `status: "degraded"` and the circuit state. Never a non-200 — the container healthcheck must not kill the backend at the moment it should be serving the cached world. |
+| `POST /api/plan`, `/api/optimize` | **503** with `{"error": {"code": "CIRCUIT_OPEN"}}`. A plan computed against a stale world is a *wrong* plan. |
+| `POST /api/optimize/execute`, `/api/allocations` | **503**, same code. |
+
+### 19.3 The metrics
+
+`backend/app/metrics.py` — a hand-rolled Prometheus writer. The
+`prometheus_client` package is deliberately **not** a dependency: the
+backend image stays slim and offline-buildable, and the writer is small
+enough to read.
+
+Two details that are easy to get wrong and are therefore guarded by tests:
+
+- **The path label is the route template**, never the raw path — otherwise
+  `/api/stations/station-mirpur` and `/api/stations/station-tongi` become
+  separate time series and the cardinality explodes.
+- **The p95 pools the label sets.** A histogram's samples live under their
+  labels, so reading the percentile with no labels returns the *empty* key.
+  `percentile_across()` pools the buckets first, which is exactly what
+  Prometheus does over an aggregated histogram. Before the fix, the health
+  endpoint reported `p95_seconds: 0.0` while serving 12,681 requests.
+
+### 19.4 The pool-saturation instrumentation
+
+The backend cannot read the simulator's internal connection pool, but it
+*owns* the semaphore that bounds its demand on it — so it measures its own
+saturation exactly:
+
+| Metric | Meaning |
+| :--- | :--- |
+| `backend_simulator_inflight_reads` | Reads currently in flight. |
+| `backend_simulator_fetch_concurrency_limit` | The semaphore's limit (4). |
+| `backend_simulator_pool_saturation_ratio` | `inflight / limit`. **Above 0.8 is the early-warning line.** |
+| `backend_simulator_read_queue_depth` | Callers waiting on the semaphore. |
+
+This is the signal §18's pool wedge did not have. It is now measured, and
+`backend/tests/test_pool_saturation.py` turns it into an executable
+invariant: the semaphore bound is never exceeded, and the saturation gauge
+never exceeds 1.0.
+
+### 19.5 The scenario configuration
+
+`backend/app/scenario.py` loads and validates `backend/scenarios/baseline.yaml`
+at boot. The forecast's public names (`PROFILES`, `REGION_DEMAND_FACTORS`,
+`FORECAST_START_TIME`) are unchanged but are now *derived* from the loaded
+config.
+
+**The guard is the oracle test.** `backend/tests/test_forecast.py` asserts 60
+of 60 exact matches against the live simulator, so if the YAML and the
+simulator ever disagree, the test fails loudly. A config file that silently
+disagrees with the world model produces a forecast that is wrong by
+thousands of litres and looks perfectly plausible.
+
+### 19.6 The scripts
+
+| Script | What it does |
+| :--- | :--- |
+| `scripts/verify-all.sh` | The harness entry point. Runs the verifier suite, the backend tests, the frontend tests, the observability self-check and the load test, and emits one JSON object. Exit code 0 only if everything passed. |
+| `scripts/check_observability.py` | 46 assertions over the exposition and the health table: every §15 family present, the right labels, the right content type, the §16 components in a known state set. |
+| `scripts/demo-normal.sh` | Beats 1–8 of the demo. |
+| `scripts/demo-crisis-fault-recovery.sh` | Beats 9–14, including the fault injection and the observed breaker transition. |
+| `loadtest/run.sh` | The load test. Picks k6 if installed, the Python harness otherwise. Both emit the same JSON schema. |

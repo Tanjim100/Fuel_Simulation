@@ -29,6 +29,7 @@ import { AnomalyPanel } from '../components/AnomalyPanel'
 import { ForecastPanel } from '../components/ForecastPanel'
 import { DepotPanel, RoutePanel, StationPanel } from '../components/NetworkPanel'
 import { StatusBar } from '../components/StatusBar'
+import { SystemPanel } from '../components/SystemPanel'
 import {
   depotTotal,
   demandByFuel,
@@ -42,6 +43,7 @@ import {
   depots,
   forecast,
   metrics,
+  observability,
   plan,
   routes,
   stations,
@@ -113,6 +115,7 @@ function backendNumbers(): Set<number> {
 
   walk(metrics)
   walk(broker)
+  walk(observability)
   walk(depots)
   walk(stations)
   walk(routes)
@@ -205,6 +208,14 @@ function derivedNumbers(): Set<number> {
   // columns, the tick length and the time units.
   ;[0, 1, 2, 3, 15, 24, 60, 96, 100].forEach(add)
 
+  // The percentile *names* in the System tab's labels — "p95 latency" and
+  // "p50 latency". These are the names of the statistics, not figures: the
+  // numbers beside them are the backend's own, and the scrape picks the
+  // digits out of the label text the same way it picks them out of a
+  // figure. Declaring them here keeps the check strict about the
+  // *values* while acknowledging the vocabulary of the label.
+  ;[50, 95].forEach(add)
+
   return allowed
 }
 
@@ -274,5 +285,10 @@ describe('the console invents no numbers', () => {
       />,
     )
     assertNoInventedNumbers(container, 'ActionCard')
+  })
+
+  it('the system panel renders only backend figures', () => {
+    const { container } = render(<SystemPanel observability={observability} />)
+    assertNoInventedNumbers(container, 'SystemPanel')
   })
 })

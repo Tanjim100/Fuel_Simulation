@@ -74,6 +74,81 @@ From `BUP_Fuel_Supply_Simulator_Integration_Guide_Final.pdf` — the simulator m
 
 ---
 
+## 4b. What this platform does and does not implement
+
+The sections above restate the organizers' requirements. This section states
+plainly **which of them this platform implements, and which it does not** — so
+nobody has to discover the gaps by reading the code.
+
+### The scope decision
+
+**The simulator is organizer-provided.** `simulator-api` is a fixed image
+(`asifmahmoud414/bup-fuel-supply-simulator:1.0.0`) whose interface is
+specified in the Integration Guide. Building a second simulator was never in
+scope; the platform is the *data, intelligence, decision, application and
+monitoring* layers **on top of** that simulator.
+
+The PDF's §20 deliverables confirm this reading: they ask for an
+architecture diagram, a decision interface, observability, resilience,
+load-test evidence and a demo narrative — **not** for a simulator.
+
+### Implemented
+
+| Requirement | Where |
+| :--- | :--- |
+| R1 Supply input | Read from the simulator; the dispatch pipeline sources from depots. |
+| R2 Demand input | Read from the simulator; the forecast models it. |
+| R3 Distribution model | Routes with transit ticks and per-shipment maxima; the gate enforces both. |
+| R4 Simulation engine | The simulator's. The backend consumes its tick clock. |
+| R5 Inventory tracking | The cached world snapshot, plus the journal of every dispatch. |
+| R6 Shortage handling | Stockout risk, projected unmet litres, the `SUPPLY_SHORTFALL` anomaly, and the gate's refusals. |
+| R8 Visualization | The operator console — one column, one hero, one drill-down at a time. |
+| **Scenario configuration** | `backend/scenarios/baseline.yaml`, validated at boot. Not hard-coded. See `docs/SCENARIO.md`. |
+| **Deterministic output** | The simulator is seeded; the scenario carries the seed; the forecast oracle asserts 60 of 60 exact matches. |
+| **Self-contained run** | `docker compose up -d` → five healthy services. No manual steps. |
+| **Error handling** | Invalid configs fail at boot with a named error; a rejected plan carries its `reject_code` and its reasoning. |
+| **Observability (PDF §15)** | `/metrics`, `/api/observability`, the console's System tab, nine Prometheus alert rules. See `docs/OBSERVABILITY.md`. |
+| **Health and status (PDF §16)** | The §16 component table, p95 latency and error rate, on `/api/health` and in the console. |
+| **Resilience (PDF §12)** | A circuit breaker with a failure classification, degraded reads, refused writes, a DLQ, and a write-ahead journal. See `docs/RESILIENCE.md`. |
+| **Load testing (PDF §18)** | Three named workloads, measured, with the report tying latency to pool saturation. See `docs/LOAD_TEST.md`. |
+
+### Not implemented
+
+**R7 — Sustainability reporting** (waste, unused/expired fuel, transport
+emissions, efficiency %). The platform surfaces the simulator's own
+sustainability-adjacent figures — `service_level`, `unmet_demand_litres`,
+`allocation_failures`, and the spilled litres the forecast projects — but
+there is **no emissions model and no carbon accounting** anywhere in the
+stack.
+
+**Why:** the simulator owns the world model. An emissions model built on top
+of it would be *our* model of *their* transport fleet, with no ground truth
+behind it — a number that looked authoritative and was invented. That is
+exactly what this platform's central rule forbids.
+
+**Why it is not fatal:** R7 is in the brief's feature list, but it is **not**
+in the PDF's §20 deliverables list, and the PDF's stated judging focuses are
+*working product, decision usefulness, architecture, DevOps, resilience,
+observability and live demonstration*. Every one of those is implemented and
+demonstrated.
+
+**The honest framing:** if a judge asks about sustainability, the answer is
+that the platform reports *fuel efficiency as the simulator defines it*
+(`service_level` — the share of demand met) and *fuel waste as the forecast
+projects it* (spilled litres at a station whose tank is overfilled), and it
+**does not model transport emissions**, because a defensible number beats an
+invented one.
+
+### Also out of scope
+
+- **Historical / time-series persistence.** The console shows the current
+  tick and the forecast horizon. There is no long-term archive — the metrics
+  time series live in Prometheus, which is the right place for them.
+- **Multiple concurrent scenarios.** One scenario, one world, one decision at
+  a time.
+
+---
+
 ## 5. Judging Criteria (as stated in the hackathon doc)
 
 - **Functionality** — does it actually simulate correctly and handle edge cases

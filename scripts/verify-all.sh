@@ -125,7 +125,11 @@ run_verifier() {
     SUITE_VERIFIER="passed"
     ok "all simulator checks passed"
     VERIFIER_OUTPUT="$log"
-    VERIFIER_SUMMARY="$(grep -Eo '[0-9]+/[0-9]+' "$log" | tail -1)"
+    # The summary line is "ALL 49 CHECKS PASSED". The per-group ratios
+    # (10/10, 7/7, ...) are NOT the total -- there are six groups, and the
+    # last one alone would report "4/4".
+    VERIFIER_SUMMARY="$(grep -Eo '[0-9]+ CHECKS PASSED' "$log" | tail -1)"
+    VERIFIER_SUMMARY="${VERIFIER_SUMMARY// CHECKS PASSED/ checks passed}"
   else
     SUITE_VERIFIER="failed"
     bad "the simulator verifier reported failures"
@@ -146,11 +150,12 @@ run_backend() {
   local log=/tmp/verify-all-backend.log
   if compose exec -T backend python -m pytest tests/ -q >"$log" 2>&1; then
     SUITE_BACKEND="passed"
-    BACKEND_SUMMARY="$(grep -Eo '[0-9]+ passed[^ ]*' "$log" | tail -1)"
+    # pytest's last line: "457 passed, 8 skipped, 7 warnings in 82.08s"
+    BACKEND_SUMMARY="$(grep -E '^[0-9]+ passed' "$log" | tail -1)"
     ok "the backend suite passed  ${BACKEND_SUMMARY}"
   else
     SUITE_BACKEND="failed"
-    BACKEND_SUMMARY="$(grep -Eo '[0-9]+ passed[^ ]*, [0-9]+ failed' "$log" | tail -1)"
+    BACKEND_SUMMARY="$(grep -E '^[0-9]+ passed' "$log" | tail -1)"
     bad "the backend suite failed  ${BACKEND_SUMMARY}"
     tail -40 "$log" | sed 's/^/        /'
   fi
@@ -170,13 +175,37 @@ run_frontend() {
     return
   fi
   local log=/tmp/verify-all-frontend.log
-  if compose exec -T frontend npm test -- --run >"$log" 2>&1; then
+  # The frontend's *runtime* image is deliberately slim -- it carries the
+  # built assets and the proxy server, and no toolchain, no source and no
+  # package.json. The suite therefore cannot run in it.
+  #
+  # So it runs in the Dockerfile's `test` stage: a build target that has the
+  # toolchain and the source. Building it and running it in a throwaway
+  # container keeps the runtime image slim AND makes the harness
+  # independent of whether the host has Node installed.
+  local image="buetcsefest-frontend-test:verify"
+  if ! docker build \
+        --target test \
+        -t "$image" \
+        -f frontend/Dockerfile \
+        . >"$log" 2>&1; then
+    SUITE_FRONTEND="failed"
+    FRONTEND_SUMMARY="the test image failed to build"
+    bad "the frontend suite failed  ${FRONTEND_SUMMARY}"
+    tail -40 "$log" | sed 's/^/        /'
+    return
+  fi
+
+  if docker run --rm "$image" >>"$log" 2>&1; then
     SUITE_FRONTEND="passed"
-    FRONTEND_SUMMARY="$(grep -Eo '[0-9]+ tests? passed' "$log" | tail -1)"
+    # vitest prints "  Tests  136 passed | 3 skipped (139)" -- the count is
+    # followed by a pipe, so the summary is taken from the Tests line and
+    # the whole "passed | skipped" tail is kept.
+    FRONTEND_SUMMARY="$(grep -E '^\s+Tests\s+' "$log" | tail -1 | sed 's/^[[:space:]]*//')"
     ok "the frontend suite passed  ${FRONTEND_SUMMARY}"
   else
     SUITE_FRONTEND="failed"
-    FRONTEND_SUMMARY="$(grep -Eo '[0-9]+ failed' "$log" | tail -1)"
+    FRONTEND_SUMMARY="$(grep -E '^\s+Tests\s+' "$log" | tail -1 | sed 's/^[[:space:]]*//')"
     bad "the frontend suite failed  ${FRONTEND_SUMMARY}"
     tail -40 "$log" | sed 's/^/        /'
   fi

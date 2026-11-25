@@ -747,6 +747,23 @@ button:disabled {
 }
 
 /* --------------------------------------------------------------------- */
+/* System tab — the §16 health table and the observability figures        */
+/* --------------------------------------------------------------------- */
+
+.sys-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-6);
+  padding: var(--space-5);
+  border-top: 1px solid var(--border);
+}
+
+.sys-facts .fact {
+  min-width: 96px;
+}
+
+/* --------------------------------------------------------------------- */
 /* Fuel breakdown                                                         */
 /* --------------------------------------------------------------------- */
 

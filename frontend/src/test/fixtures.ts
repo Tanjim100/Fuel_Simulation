@@ -14,6 +14,7 @@ import type {
   Health,
   Incident,
   Metrics,
+  Observability,
   OptimizeResponse,
   Route,
   Station,
@@ -296,5 +297,65 @@ export const plan: OptimizeResponse = {
     risks: ['Gazipur route is disrupted.'],
     next_actions: ['Dispatch the current-tick shipment.'],
     evidence: {},
+  },
+}
+
+/**
+ * The observability payload — copied from a real `/api/observability`
+ * response, so a test that passes here is a test against reality.
+ */
+export const observability: Observability = {
+  status: 'OK',
+  components: {
+    backend_api: { state: 'HEALTHY' },
+    redis: { state: 'HEALTHY' },
+    fuel_simulator: { state: 'HEALTHY' },
+    prediction_service: { state: 'HEALTHY' },
+    decision_engine: { state: 'HEALTHY' },
+  },
+  latency: { p95_seconds: 0.02425, p50_seconds: 0.0041, avg_seconds: 0.0062 },
+  requests: { total: 12681, errors: 0, error_rate: 0 },
+  circuit: {
+    state: 'CLOSED',
+    consecutive_failures: 0,
+    opened_at: null,
+    cooldown_remaining: 0,
+    total_failures: 0,
+    total_rejections: 0,
+    transitions: 0,
+  },
+  broker: {
+    mode: 'sse',
+    events_received: 4392,
+    suspected_drops: 0,
+    probe_failures: 0,
+    reconnects: 0,
+  },
+  upstream: { reachable: true, error: null },
+  snapshot: { tick: 7, age_seconds: 0.867 },
+  dlq: { size: 0 },
+  metric_families: {
+    application: ['backend_http_requests_total'],
+    system: ['backend_simulator_pool_saturation_ratio'],
+    intelligence: ['backend_fallback_activations_total'],
+    resilience: ['backend_circuit_state'],
+  },
+  metrics: {
+    counters: {
+      backend_fallback_activations_total: {
+        'kind=degraded_mode': 0,
+        'kind=poll_fallback': 0,
+        'kind=breaker_open': 0,
+        'kind=forecast_fallback': 0,
+      },
+      backend_circuit_rejections_total: { '': 0 },
+    },
+    gauges: {
+      backend_simulator_pool_saturation_ratio: { '': 0.25 },
+      backend_simulator_inflight_reads: { '': 1 },
+      backend_simulator_fetch_concurrency_limit: { '': 4 },
+      backend_simulator_read_queue_depth: { '': 0 },
+    },
+    histograms: {},
   },
 }

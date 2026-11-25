@@ -572,7 +572,7 @@ And prove the invariant survived the whole thing:
 
 ```bash
 cd frontend && LIVE_BACKEND=http://localhost:8002 npm test
-# → 132 passed
+# → 136 passed
 ```
 
 The live suite renders the console against the **running, injected** world and

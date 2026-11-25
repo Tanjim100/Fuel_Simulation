@@ -435,15 +435,25 @@ class EventBroker:
                         inflight / float(self._fetch_concurrency)
                     )
 
+        # -- gather the reads ------------------------------------------------ #
+        # The attribute lookups happen *before* the gather, so a client
+        # that is missing one of these methods would raise here and strand
+        # the coroutines already built -- an unawaited-coroutine warning
+        # and a leaked coroutine object. Look the methods up first, then
+        # build the coroutines, so a failing lookup cannot abandon the
+        # ones that already succeeded.
+        methods = (
+            client.instance,
+            client.depots,
+            client.stations,
+            client.routes,
+            client.allocations,
+            client.metrics,
+            client.supply_arrivals,
+            client.events,
+        )
         reads = await asyncio.gather(
-            read(client.instance),
-            read(client.depots),
-            read(client.stations),
-            read(client.routes),
-            read(client.allocations),
-            read(client.metrics),
-            read(client.supply_arrivals),
-            read(client.events),
+            *(read(method) for method in methods),
             return_exceptions=True,
         )
         if any(isinstance(r, BaseException) for r in reads):
