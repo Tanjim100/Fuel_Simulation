@@ -1,9 +1,160 @@
-services: 
-  simulator-api: 
-    image: asifmahmoud414/bup-fuel-supply-simulator:1.0.0 
-    environment: 
-      SIMULATION_SPEED: ${SIMULATION_SPEED:-15} 
-      TICK_MINUTES: ${TICK_MINUTES:-8} 
-      SIMULATOR_START_MODE: ${SIMULATOR_START_MODE:-paused}  # Options: paused, running 
-    ports: 
-      - "8000:8000" 
+services:
+  simulator-api:
+    image: asifmahmoud414/bup-fuel-supply-simulator:1.0.0
+    container_name: buetcsefest-simulator-api
+    environment:
+      # Wall-clock ticks per second while the simulation is RUNNING.
+      SIMULATION_SPEED: ${SIMULATION_SPEED:-8}
+      # Simulated minutes advanced per tick.
+      TICK_MINUTES: ${TICK_MINUTES:-15}
+      # Start paused so tests drive ticks deterministically via /admin/step.
+      SIMULATOR_START_MODE: ${SIMULATOR_START_MODE:-paused}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - buet-net
+
+  redis:
+    image: redis:alpine
+    container_name: buetcsefest-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - buet-net
+
+  client-verifier:
+    build:
+      context: ./verifier
+      dockerfile: Dockerfile
+    container_name: buetcsefest-client-verifier
+    depends_on:
+      simulator-api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SIMULATOR_BASE_URL: http://simulator-api:8000
+      REDIS_URL: redis://redis:6379/0
+      REPORT_PATH: /app/reports
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8001:8001"
+    volumes:
+      # Code is baked into the image (see verifier/Dockerfile). Only the
+      # generated reports are persisted. No host bind-mount is used so the
+      # stack works on Docker Desktop with paths containing spaces.
+      - verifier-reports:/app/reports
+    restart: unless-stopped
+    command:
+      - uvicorn
+      - verify_api:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8001"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - buet-net
+
+  backend:
+    build:
+      # The project root is the context so the image can bake in the
+      # reference client (verifier/simulator_client.py) that the drift guard
+      # (tests/test_client_parity.py) compares against the backend's copy.
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: buetcsefest-backend
+    depends_on:
+      simulator-api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SIMULATOR_BASE_URL: http://simulator-api:8000
+      REDIS_URL: redis://redis:6379/0
+      BACKEND_PORT: "8002"
+      # Seconds without an SSE event while the world has advanced -> suspected drop.
+      SSE_STALE_AFTER: "20"
+      # Seconds of poller-only operation before we try to reclaim SSE.
+      SSE_RECOVER_AFTER: "10"
+      POLL_INTERVAL: "2"
+      WATCHDOG_INTERVAL: "5"
+      # Force a fresh SSE subscription after this long, bounding the blast
+      # radius of an undetected silent drop.
+      SSE_MAX_LIFETIME: "900"
+      STATE_MAX_AGE: "1.0"
+      EVENT_BUFFER: "200"
+      SUBSCRIBER_QUEUE: "64"
+      JOURNAL_PATH: /app/data/journal.sqlite3
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8002:8002"
+    volumes:
+      # The dispatch journal lives on a named volume (NOT a host bind-mount --
+      # Docker Desktop cannot mount this project's path, which contains spaces).
+      - backend-journal:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8002/api/health',timeout=4)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    networks:
+      - buet-net
+
+  frontend:
+    build:
+      # The project root is the context so the Dockerfile can COPY
+      # frontend/package.json and frontend/ without a host bind-mount
+      # (Docker Desktop cannot mount this path -- it contains spaces).
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: buetcsefest-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      PORT: "8003"
+      # The console proxies /api to the backend, so the browser needs no CORS
+      # configuration and never learns the backend's internal hostname.
+      BACKEND_ORIGIN: http://backend:8002
+      NODE_ENV: production
+    ports:
+      - "8003:8003"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8003/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - buet-net
+
+networks:
+  buet-net:
+    driver: bridge
+
+volumes:
+  verifier-reports:
+  backend-journal:

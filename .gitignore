@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Verification artifacts
+verifier/reports/
+report.json
+*.log
+
+# Local runtime state (the journal is a local sqlite db, recreated on boot)
+backend/data/
+
+# Tool-local state
+.puku-cli/
+
+# OS
+.DS_Store
