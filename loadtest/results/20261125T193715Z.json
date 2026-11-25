@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "tool": "python-harness",
+  "started_at": "2026-11-25T19:38:52.328150+00:00",
+  "duration_seconds": 30.0,
+  "vus": 12,
+  "concurrency": 12,
+  "base_url": "http://localhost:8002",
+  "host": {
+    "hostname": "Tanjims-MacBook-Air-2.local",
+    "python": "3.12.8"
+  },
+  "scenarios": [
+    {
+      "requests": 1377,
+      "errors": 0,
+      "error_rate": 0.0,
+      "latency_ms": {
+        "avg": 208.991,
+        "p50": 202.336,
+        "p95": 249.286,
+        "p99": 269.301,
+        "min": 65.008,
+        "max": 302.187
+      },
+      "statuses": {
+        "200": 1377
+      },
+      "name": "W1-decision",
+      "description": "POST /api/optimize -- the end-to-end decision path",
+      "duration_seconds": 30.232,
+      "throughput_rps": 45.547,
+      "resource": {
+        "available": true,
+        "container": "buetcsefest-backend",
+        "cpu_pct": 0.47,
+        "mem_mb": 51.5
+      },
+      "pool_saturation": {
+        "peak": 1.0,
+        "mean": 0.6441,
+        "samples": 59,
+        "inflight_peak": 4.0
+      }
+    },
+    {
+      "requests": 5930,
+      "errors": 0,
+      "error_rate": 0.0,
+      "latency_ms": {
+        "avg": 6.246,
+        "p50": 5.048,
+        "p95": 13.649,
+        "p99": 22.844,
+        "min": 1.241,
+        "max": 70.641
+      },
+      "statuses": {
+        "200": 5930
+      },
+      "name": "W2-dashboard",
+      "description": "GET /api/stations -- the console's poll path",
+      "duration_seconds": 30.048,
+      "throughput_rps": 197.352,
+      "resource": {
+        "available": true,
+        "container": "buetcsefest-backend",
+        "cpu_pct": 0.4,
+        "mem_mb": 51.48
+      },
+      "pool_saturation": {
+        "peak": 0.25,
+        "mean": 0.0043,
+        "samples": 58,
+        "inflight_peak": 1.0
+      }
+    },
+    {
+      "requests": 5903,
+      "errors": 0,
+      "error_rate": 0.0,
+      "latency_ms": {
+        "avg": 6.25,
+        "p50": 5.068,
+        "p95": 15.236,
+        "p99": 23.305,
+        "min": 1.646,
+        "max": 52.636
+      },
+      "statuses": {
+        "200": 5903
+      },
+      "name": "W3-console-mix",
+      "description": "the console's weighted read mix plus an SSE subscriber",
+      "duration_seconds": 32.065,
+      "throughput_rps": 184.093,
+      "resource": {
+        "available": true,
+        "container": "buetcsefest-backend",
+        "cpu_pct": 99.87,
+        "mem_mb": 51.82
+      },
+      "pool_saturation": {
+        "peak": 0.0,
+        "mean": 0.0,
+        "samples": 63,
+        "inflight_peak": 0.0
+      }
+    }
+  ],
+  "backend_metrics_snapshot": {
+    "before": {
+      "available": true,
+      "pool_saturation": 0.0,
+      "inflight_reads": 0.0,
+      "fetch_concurrency_limit": 4.0,
+      "circuit_state": "CLOSED",
+      "broker_mode": "sse",
+      "error_rate": 0.0,
+      "p95_seconds": 0.07
+    },
+    "after": {
+      "available": true,
+      "pool_saturation": 0.0,
+      "inflight_reads": 0.0,
+      "fetch_concurrency_limit": 4.0,
+      "circuit_state": "CLOSED",
+      "broker_mode": "sse",
+      "error_rate": 0.0,
+      "p95_seconds": 0.179521
+    },
+    "pool_saturation_peak": 1.0,
+    "circuit_state": "CLOSED"
+  },
+  "notes": "The numbers are this stack's limits on this machine, not a benchmark to beat. PDF section 18 asks for an understanding of the system's behaviour and limits. The pool-saturation figure is the mechanism behind the latency: it is the backend's own demand on the simulator, measured against the 4-wide semaphore that bounds it. A saturation at or above 0.8 is the early-warning threshold -- the connection-pool wedge that once wedged this backend for 30 seconds per request would have been visible here long before it became an outage."
+}

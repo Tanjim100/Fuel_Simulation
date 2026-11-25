@@ -1,0 +1,70 @@
+# The baseline scenario.
+#
+# This is the scenario the backend forecasts against. It is a mirror of the
+# simulator image's own `baseline.yaml` -- that file lives inside the
+# simulator container and cannot be read at runtime, so the numbers were
+# transcribed here. Before this file existed they were transcribed into
+# Python literals, which PDF §19 forbids ("do not hard-code") and which
+# meant the scenario could not be swapped without a code change.
+#
+# The values below are the source of truth for:
+#   * `forecast.PROFILES`               -- the daily litres per fuel
+#   * `forecast.REGION_DEMAND_FACTORS`  -- the per-region multipliers
+#   * `forecast.FORECAST_START_TIME`    -- the clock origin
+#   * `forecast.TICK_MINUTES`           -- the tick length
+#
+# Change a value here and the forecast changes with it -- and the forecast
+# oracle test (`backend/tests/test_forecast.py` against
+# `tests/fixtures/demand_golden.json`) fails loudly if the change disagrees
+# with the live simulator. That failure is the point: a config file that
+# silently disagrees with the world model produces a forecast that is wrong
+# by thousands of litres and looks perfectly plausible.
+#
+# See `docs/SCENARIO.md` for the schema and for how to point the backend at
+# a different scenario.
+
+scenario: baseline
+seed: 12345
+
+# The clock origin. The simulator's tick 0 is this instant.
+start_time: "2026-01-01T00:00:00+00:00"
+
+# Minutes per tick. 15 minutes => 96 ticks per day.
+tick_minutes: 15
+
+# The demand profile per station archetype. `daily_liters` is the *nominal*
+# daily volume; the simulator derives the per-tick demand from it with an
+# hour-of-day factor, so realised daily volume is NOT `daily_liters`.
+# `noise` is the uniform jitter fraction, +/-.
+demand_profiles:
+  urban_high:
+    noise: 0.10
+    daily_liters:
+      DIESEL: 8500.0
+      PETROL: 10500.0
+      OCTANE: 5600.0
+  industrial:
+    noise: 0.08
+    daily_liters:
+      DIESEL: 14000.0
+      PETROL: 4500.0
+      OCTANE: 2200.0
+  highway:
+    noise: 0.12
+    daily_liters:
+      DIESEL: 10500.0
+      PETROL: 11000.0
+      OCTANE: 6200.0
+  regional:
+    noise: 0.10
+    daily_liters:
+      DIESEL: 7200.0
+      PETROL: 7600.0
+      OCTANE: 3600.0
+
+# The per-region demand multipliers.
+regions:
+  region-dhaka:
+    demand_factor: 1.00
+  region-chattogram:
+    demand_factor: 1.08

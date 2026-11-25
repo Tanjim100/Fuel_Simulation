@@ -58,6 +58,22 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 import httpx
 
 from .config import Settings
+from .circuit_breaker import CircuitOpen
+from .metrics import (
+    BROKER_MODE,
+    BROKER_PROBE_FAILURES,
+    BROKER_RECONNECTS,
+    BROKER_SUSPECTED_DROPS,
+    SIMULATOR_CONCURRENCY_LIMIT,
+    SIMULATOR_INFLIGHT,
+    SIMULATOR_QUEUE_DEPTH,
+    SIMULATOR_SATURATION,
+    SNAPSHOT_AGE,
+    SNAPSHOT_REFRESH,
+    SSE_DROPPED,
+    SSE_EVENTS,
+    SSE_FANOUT,
+)
 from .simulator_client import SimulatorClient, SimulatorError
 from .state import (
     Observation,
@@ -169,8 +185,21 @@ class EventBroker:
         ] = None,
         sse_probe: Optional[Callable[[], Awaitable[bool]]] = None,
         observations: Optional[ObservationLog] = None,
+        breaker: Optional[Any] = None,
+        dlq: Optional[Any] = None,
     ) -> None:
+        #: The **raw** simulator client.
+        #:
+        #: The SSE subscription is a long-lived async generator, not a
+        #: request-shaped call, so it must not go through the circuit
+        #: breaker: the breaker mediates individual calls, and a subscription
+        #: is neither individual nor finite. It also has no latency to record
+        #: until it ends.
         self.client = client
+        #: The circuit breaker, used for the *request-shaped* reads that make
+        #: up a snapshot. Those are the calls that saturate the simulator's
+        #: connection pool, so they are the ones the breaker must protect.
+        self.breaker = breaker
         self.state = state
         self.settings = settings
         self.status = BrokerStatus()
@@ -181,6 +210,11 @@ class EventBroker:
         #: The rolling observation window the anomaly detectors read.
         #: Optional so the broker stays usable without it.
         self.observations = observations
+        #: The dead-letter queue. Payloads the broker cannot use are
+        #: quarantined here instead of being dropped or raised. Optional so
+        #: the broker stays usable without it -- but with it, a malformed SSE
+        #: frame is survivable.
+        self.dlq = dlq
 
         #: Bounds how many world reads may be in flight at once.
         #:
@@ -196,6 +230,9 @@ class EventBroker:
         #: exists.
         self._fetch_concurrency = settings.fetch_concurrency
         self._fetch_semaphore: Optional[asyncio.Semaphore] = None
+        # Publish the bound, so the saturation ratio has a denominator even
+        # before the first read happens.
+        SIMULATOR_CONCURRENCY_LIMIT.set(float(self._fetch_concurrency))
 
         self._recent: deque[BrokerEvent] = deque(maxlen=settings.event_buffer)
         self._subscribers: set[asyncio.Queue[BrokerEvent]] = set()
@@ -251,7 +288,19 @@ class EventBroker:
     # Snapshot refresh
     # ------------------------------------------------------------------ #
     async def refresh_snapshot(self) -> Optional[WorldSnapshot]:
-        """Pull a fresh world snapshot over REST and publish it."""
+        """Pull a fresh world snapshot over REST and publish it.
+
+        A failed refresh returns ``None`` and leaves the cached world in
+        place -- that is the degraded-mode contract for the *reads*.
+
+        The one exception is :class:`CircuitOpen`, which is re-raised rather
+        than swallowed. The breaker rejecting a call is not "the refresh
+        failed, here is the old world" -- it is "we did not even try". A
+        caller that gets ``None`` back believes it is looking at a fresh
+        snapshot, and would then plan a write against a world that is
+        minutes old. Swallowing it would turn the breaker's safety into a
+        lie exactly where it matters most: the write path.
+        """
         try:
             if self._snapshot_fetcher is not None:
                 snapshot = await self._snapshot_fetcher()
@@ -260,16 +309,24 @@ class EventBroker:
             await self.state.replace(snapshot)
             self.status.snapshot_refreshes += 1
             self.status.last_tick_seen = snapshot.tick
+            SNAPSHOT_REFRESH.inc(result="ok")
+            SNAPSHOT_AGE.set(self.state.current().age())
             await self._record_observations(snapshot)
             return snapshot
+        except CircuitOpen:
+            # Not a failed refresh -- a rejected one. Let it through.
+            SNAPSHOT_REFRESH.inc(result="error")
+            raise
         except SimulatorError as exc:
             LOGGER.warning("Snapshot refresh failed: %s", exc)
             self.status.last_error = str(exc)
+            SNAPSHOT_REFRESH.inc(result="error")
             await self.state.mark_error(str(exc))
             return None
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.warning("Snapshot refresh failed: %s", exc)
             self.status.last_error = str(exc)
+            SNAPSHOT_REFRESH.inc(result="error")
             await self.state.mark_error(str(exc))
             return None
 
@@ -341,19 +398,52 @@ class EventBroker:
             semaphore = asyncio.Semaphore(self._fetch_concurrency)
             self._fetch_semaphore = semaphore
 
+        # The reads go through the circuit breaker when there is one. These
+        # are the calls that saturate the simulator's connection pool, so
+        # they are exactly the ones that must fail fast when the upstream
+        # is down -- instead of each one burning the client's full retry
+        # budget (3 attempts, up to 4s of jitter each) before giving up.
+        client = self.breaker if self.breaker is not None else self.client
+
+        # -- pool saturation instrumentation -------------------------------- #
+        # The semaphore is *ours*, so the saturation of the simulator's
+        # connection pool is directly observable from our side: the number of
+        # reads in flight divided by the bound we set.
+        #
+        # This is the signal that would have made the pool wedge visible in
+        # seconds rather than hours. Before the incident the only evidence
+        # was a line in the simulator's log, read much later.
+        inflight = 0
+        queue_depth = 0
+
         async def read(make_coro):
+            nonlocal inflight, queue_depth
+            queue_depth += 1
+            SIMULATOR_QUEUE_DEPTH.set(queue_depth)
             async with semaphore:
-                return await make_coro()
+                queue_depth -= 1
+                SIMULATOR_QUEUE_DEPTH.set(queue_depth)
+                inflight += 1
+                SIMULATOR_INFLIGHT.set(inflight)
+                SIMULATOR_SATURATION.set(inflight / float(self._fetch_concurrency))
+                try:
+                    return await make_coro()
+                finally:
+                    inflight -= 1
+                    SIMULATOR_INFLIGHT.set(inflight)
+                    SIMULATOR_SATURATION.set(
+                        inflight / float(self._fetch_concurrency)
+                    )
 
         reads = await asyncio.gather(
-            read(self.client.instance),
-            read(self.client.depots),
-            read(self.client.stations),
-            read(self.client.routes),
-            read(self.client.allocations),
-            read(self.client.metrics),
-            read(self.client.supply_arrivals),
-            read(self.client.events),
+            read(client.instance),
+            read(client.depots),
+            read(client.stations),
+            read(client.routes),
+            read(client.allocations),
+            read(client.metrics),
+            read(client.supply_arrivals),
+            read(client.events),
             return_exceptions=True,
         )
         if any(isinstance(r, BaseException) for r in reads):
@@ -426,6 +516,7 @@ class EventBroker:
                             break
                         # Only now do we know the subscription actually works.
                         self.status.mode = "sse"
+                        BROKER_MODE.set(0)
                         self.status.sse_connected_since = time.time()
                         await self._handle_sse_event(event.event or "message", event.data)
 
@@ -435,6 +526,7 @@ class EventBroker:
                                 "reconnecting", self.settings.sse_max_lifetime)
                             self.status.forced_reconnects += 1
                             self.status.reconnects += 1
+                            BROKER_RECONNECTS.inc()
                             break
                 finally:
                     # Close the subscription deterministically. Walking away
@@ -497,24 +589,93 @@ class EventBroker:
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.debug("SSE subscription close failed: %s", exc)
 
+    async def replay_dead_letter(self, entry: Any) -> None:
+        """Replay a dead-lettered payload through its original handler.
+
+        The payload is handed back to the frame handler. If the frame is
+        still malformed the handler will dead-letter it again -- which is the
+        correct outcome: the entry has not been handled, so it must stay in
+        the queue.
+        """
+        source = getattr(entry, "source", "") or ""
+        event_name = source.split(":", 1)[1] if ":" in source else "message"
+        payload = getattr(entry, "payload", "") or ""
+        await self._handle_sse_event(event_name, payload)
+
+    def _dead_letter(
+        self,
+        payload: Any,
+        *,
+        reason: str,
+        source: str,
+        detail: str = "",
+    ) -> None:
+        """Quarantine a payload the broker could not use.
+
+        Never raises. A dead-letter queue that can itself fail would turn a
+        recoverable bad frame into an outage -- the exact opposite of what
+        it is for.
+        """
+        if self.dlq is None:
+            LOGGER.warning(
+                "Discarding a %s payload from %s (no dead-letter queue): %s",
+                reason, source, detail,
+            )
+            return
+        try:
+            entry = self.dlq.put(payload, reason=reason, source=source)
+            LOGGER.warning(
+                "Dead-lettered a %s payload from %s (id=%s): %s",
+                reason, source, entry.id, detail,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.warning(
+                "Could not dead-letter a %s payload from %s: %s",
+                reason, source, exc,
+            )
+
     async def _handle_sse_event(self, event_name: str, raw_data: str) -> None:
         """Normalise, record and fan out one SSE event.
 
         The event payload is **advisory**. The state update is the REST
         re-fetch that follows; the payload is never trusted as world state.
+
+        A frame that cannot be parsed is **dead-lettered, not raised**. The
+        subscription must survive a single bad frame: an event feed that
+        dies on one malformed message is an event feed that stops
+        delivering events, which is far worse than a feed that quarantines
+        the bad message and keeps going. The operator can see the entry and
+        replay it.
         """
         try:
             data = json.loads(raw_data)
-        except (ValueError, TypeError):
-            data = {"raw": raw_data}
+        except (ValueError, TypeError) as exc:
+            self._dead_letter(
+                raw_data,
+                reason="malformed_frame",
+                source=f"sse:{event_name}",
+                detail=str(exc),
+            )
+            return
 
-        tick = data.get("tick") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            self._dead_letter(
+                raw_data,
+                reason="unparseable_payload",
+                source=f"sse:{event_name}",
+                detail="the frame's JSON was not an object",
+            )
+            return
+
+        tick = data.get("tick")
         broker_event = BrokerEvent(
-            event=event_name, data=data if isinstance(data, dict) else {"value": data},
+            event=event_name,
+            data=data,
             tick=tick if isinstance(tick, int) else None,
         )
 
         self.status.events_received += 1
+        SSE_EVENTS.inc()
         self.status.last_event_at = time.time()
         self.status.last_event_monotonic = time.monotonic()
         self.status.resync_required = False
@@ -522,7 +683,13 @@ class EventBroker:
         await self._fanout(broker_event)
 
         # SSE is only a hint that something changed -- refresh over REST.
-        await self.refresh_snapshot()
+        try:
+            await self.refresh_snapshot()
+        except CircuitOpen:
+            # The breaker rejected the refresh. The event itself was still
+            # delivered to the subscribers; only the REST reconciliation was
+            # skipped.
+            pass
 
     # ------------------------------------------------------------------ #
     # Fan-out
@@ -534,12 +701,14 @@ class EventBroker:
             try:
                 queue.put_nowait(event)
                 self.status.events_fanned_out += 1
+                SSE_FANOUT.inc()
             except asyncio.QueueFull:
                 # Drop the oldest event for this slow subscriber and flag a
                 # resync -- the subscriber will pull fresh state on reconnect.
                 with contextlib.suppress(asyncio.QueueEmpty):
                     queue.get_nowait()
                     self.status.events_dropped += 1
+                    SSE_DROPPED.inc()
                 with contextlib.suppress(asyncio.QueueFull):
                     queue.put_nowait(event)
 
@@ -585,6 +754,14 @@ class EventBroker:
 
         This runs whether or not SSE is healthy. It is what makes a silent SSE
         drop a *freshness* problem rather than a correctness one.
+
+        It is also the breaker's **probe**. When the breaker is OPEN the
+        poller keeps calling ``refresh_snapshot()``; the breaker rejects
+        those calls until the cooldown elapses, then lets exactly one
+        through as a HALF_OPEN probe. A successful probe closes the breaker
+        and the world resumes on its own -- no operator action, no manual
+        reset. That is why the loop must survive ``CircuitOpen``: it is the
+        expected condition during an outage, not an error.
         """
         while not self._stop.is_set():
             try:
@@ -595,7 +772,12 @@ class EventBroker:
             except asyncio.TimeoutError:
                 pass
 
-            await self.refresh_snapshot()
+            try:
+                await self.refresh_snapshot()
+            except CircuitOpen:
+                # The breaker is open. The cached world stands; the next
+                # poll is the next probe.
+                pass
             self.status.poll_count += 1
             self.status.last_poll_at = time.time()
             await self._maybe_reclaim_sse()
@@ -686,13 +868,16 @@ class EventBroker:
                     and self._sse_task is not None \
                     and not self._sse_task.done():
                 self.status.mode = "sse"
+                BROKER_MODE.set(1)
                 if self.status.sse_connected_since is None:
                     self.status.sse_connected_since = time.time()
         else:
             self.status.probe_failures += 1
+            BROKER_PROBE_FAILURES.inc()
             self.status.sse_reachable = False
             if self.status.mode != "polling":
                 self.status.mode = "polling"
+                BROKER_MODE.set(1)
                 LOGGER.warning(
                     "SSE endpoint is refusing connections; degrading to polling")
 
@@ -735,7 +920,9 @@ class EventBroker:
             # The world moved but we heard nothing for too long -> the
             # subscription is orphaned. Only reconnecting can fix it.
             self.status.suspected_drops += 1
+            BROKER_SUSPECTED_DROPS.inc()
             self.status.mode = "polling"
+            BROKER_MODE.set(1)
             self.status.resync_required = True
             self.status.last_error = (
                 f"SSE silent for {silence:.1f}s while the tick advanced to "
@@ -761,7 +948,13 @@ class EventBroker:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self.status.reconnects += 1
+        BROKER_RECONNECTS.inc()
         self.status.mode = "polling"
+        BROKER_MODE.set(1)
         self._sse_task = asyncio.create_task(self._sse_loop(), name="broker-sse")
         # Refresh immediately so the gap is as short as possible.
-        await self.refresh_snapshot()
+        try:
+            await self.refresh_snapshot()
+        except CircuitOpen:
+            # The breaker is open -- the poller will probe instead.
+            pass

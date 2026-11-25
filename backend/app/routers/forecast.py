@@ -17,7 +17,9 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 
+from ..degraded import degraded_fields, read_snapshot
 from ..explain import explain_stockout_risk
+from ..metrics import FORECAST_ERROR, FORECAST_VALIDATION, SHORTAGE_ALERTS
 from ..forecast import (
     DEMAND_TOLERANCE,
     FUEL_TYPES,
@@ -32,9 +34,15 @@ router = APIRouter(prefix="/api/forecast", tags=["forecast"])
 
 
 async def _fresh_snapshot(request: Request) -> WorldSnapshot:
-    broker = request.app.state.broker
-    await broker.refresh_snapshot()
-    return request.app.state.world.current()
+    """The forecast's world.
+
+    Read-only, so it uses the shared degraded-aware read: when the upstream
+    is gone the forecast is still computed from the last known good world and
+    the response says so. A forecast is a projection, not a write -- serving
+    a slightly stale projection with an honest flag is more useful than
+    refusing to answer.
+    """
+    return await read_snapshot(request)
 
 
 def _build(request: Request, snapshot: WorldSnapshot, horizon: int) -> ForecastBundle:
@@ -68,6 +76,7 @@ async def get_forecast(
             for (station_id, fuel), series in sorted(forecast.demand.items())
         },
         "risk": [r.to_dict() for r in forecast.risk],
+        **degraded_fields(request),
     }
 
 
@@ -105,6 +114,7 @@ async def validate_forecast(
             "reason": f"the demand history could not be read: {exc}",
             "matched": 0,
             "mismatched": 0,
+            **degraded_fields(request),
         }
 
     rows = _history_rows(history)
@@ -157,6 +167,10 @@ async def validate_forecast(
         expected = anchored.demand_at(station_id, fuel_type, int(tick))
         error = abs(float(expected) - float(observed))
         largest_error = max(largest_error, error)
+        # The prediction error, as a metric. This is the "prediction error"
+        # the PDF's section 15 intelligence layer asks for -- how far the
+        # forecast is from what the simulator actually did.
+        FORECAST_ERROR.observe(error)
 
         if error <= DEMAND_TOLERANCE:
             matched += 1
@@ -188,6 +202,11 @@ async def validate_forecast(
         verdict = "MISMATCH"
         reason = f"{mismatched} of {total} compared values differ."
 
+    # The validation counter: how many validations have been run, and how
+    # they came out. A forecast that is *never* validated against the live
+    # oracle is a forecast nobody is checking.
+    FORECAST_VALIDATION.inc(verdict=verdict)
+
     return {
         "status": "OK",
         "tick": snapshot.tick,
@@ -199,6 +218,7 @@ async def validate_forecast(
         "largest_error_litres": largest_error,
         "tolerance_litres": DEMAND_TOLERANCE,
         "failures": failures,
+        **degraded_fields(request),
     }
 
 
@@ -239,6 +259,7 @@ async def forecast_summary(
         ),
         "at_risk_count": len(at_risk),
         "stations": rows,
+        **degraded_fields(request),
     }
 
 
@@ -286,6 +307,7 @@ async def get_station_forecast(
         "routes": [
             r.model_dump() for r in snapshot.routes_for_station(station_id)
         ],
+        **degraded_fields(request),
     }
 
 

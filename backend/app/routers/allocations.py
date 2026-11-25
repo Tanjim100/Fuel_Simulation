@@ -17,8 +17,10 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from ..circuit_breaker import CircuitOpen
 from ..dispatch import GatedShipment, execute_shipments
 from ..errors import PlanRejected
+from ..metrics import DECISIONS
 from ..models import (
     AllocationExecution,
     AllocationRequestBody,
@@ -77,6 +79,11 @@ async def create_plan(request: Request, body: PlanRequest) -> PlanResponse:
     rejection *is* the answer, and it carries the reasoning.
     """
     plan = await _plan_from_current_state(request, body)
+    # The decision frequency the PDF's section 15 intelligence layer asks
+    # for: how many times the operator asked for a plan. A plan is a
+    # *decision request* -- it is counted whether it was accepted or
+    # rejected, because a run of rejections is itself a finding.
+    DECISIONS.inc(kind="plan")
     return PlanResponse(plan=plan)
 
 
@@ -107,6 +114,11 @@ async def create_allocations(
     failed: list[dict[str, Any]] = []
     total = 0.0
 
+    # A dispatch that actually sent fuel. Counted here -- after the gate
+    # has passed and the write is under way -- so the counter measures
+    # *shipments*, not requests.
+    DECISIONS.inc(kind="dispatch")
+
     # The write path is shared with the optimiser's execute endpoint -- one
     # implementation of the journal-then-write-then-record sequence.
     outcome = await execute_shipments(
@@ -123,7 +135,13 @@ async def create_allocations(
     total = outcome.total_litres
 
     # The world changed -- pull a fresh snapshot so the next plan sees it.
-    await broker.refresh_snapshot()
+    # The shipments are already sent at this point, so a rejected refresh
+    # must not fail the request: the write succeeded, and the *next* request
+    # will pick up the new world when the breaker closes.
+    try:
+        await broker.refresh_snapshot()
+    except CircuitOpen:
+        pass
 
     execution = AllocationExecution(
         plan_status=plan.status,
@@ -147,7 +165,13 @@ async def cancel_allocation(allocation_id: int, request: Request) -> dict[str, A
     broker = request.app.state.broker
 
     allocation = await client.cancel_allocation(allocation_id)
-    await broker.refresh_snapshot()
+    DECISIONS.inc(kind="cancel")
+    # The cancellation is already done; a rejected refresh must not fail
+    # the request.
+    try:
+        await broker.refresh_snapshot()
+    except CircuitOpen:
+        pass
     return {"status": "OK", "allocation": allocation.model_dump()}
 
 

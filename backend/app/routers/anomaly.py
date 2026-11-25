@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 
+from ..degraded import degraded_fields, read_snapshot
 from ..anomaly import (
     SEVERITY_ORDER,
     Anomaly,
@@ -20,15 +21,22 @@ from ..anomaly import (
 )
 from ..explain import explain_incident, explain_stockout_risk
 from ..forecast import build_forecast
+from ..metrics import SHORTAGE_ALERTS
 from ..state import WorldSnapshot
 
 router = APIRouter(prefix="/api", tags=["anomaly"])
 
 
 async def _fresh_snapshot(request: Request) -> WorldSnapshot:
-    broker = request.app.state.broker
-    await broker.refresh_snapshot()
-    return request.app.state.world.current()
+    """The anomaly detectors' world.
+
+    Read-only, so it uses the shared degraded-aware read: when the upstream
+    is gone the detectors still run against the last known good world and the
+    response says so. Detectors are the operator's early-warning system --
+    refusing to answer during an outage would be exactly the wrong moment to
+    go blind.
+    """
+    return await read_snapshot(request)
 
 
 async def _all_anomalies(request: Request) -> list[Anomaly]:
@@ -108,6 +116,7 @@ async def list_anomalies(
         "tick": snapshot.tick,
         "count": len(filtered),
         "anomalies": [a.to_dict() for a in filtered],
+        **degraded_fields(request),
     }
 
 
@@ -122,6 +131,11 @@ async def anomaly_summary(request: Request) -> dict[str, Any]:
     for anomaly in anomalies:
         by_kind[anomaly.kind] = by_kind.get(anomaly.kind, 0) + 1
         by_severity[anomaly.severity] = by_severity.get(anomaly.severity, 0) + 1
+        # The shortage-alert rate the PDF's section 15 intelligence layer
+        # asks for: how many alerts of each severity the operator was told
+        # about. A rising HIGH count is a demand problem before it is an
+        # inventory problem.
+        SHORTAGE_ALERTS.inc(severity=anomaly.severity)
 
     return {
         "status": "OK",
@@ -130,6 +144,7 @@ async def anomaly_summary(request: Request) -> dict[str, Any]:
         "by_kind": by_kind,
         "by_severity": by_severity,
         "severity_order": list(SEVERITY_ORDER),
+        **degraded_fields(request),
     }
 
 
@@ -139,7 +154,11 @@ async def get_anomaly(anomaly_id: str, request: Request) -> dict[str, Any]:
     anomalies = await _all_anomalies(request)
     for anomaly in anomalies:
         if anomaly.id == anomaly_id:
-            return {"status": "OK", "anomaly": anomaly.to_dict()}
+            return {
+                "status": "OK",
+                "anomaly": anomaly.to_dict(),
+                **degraded_fields(request),
+            }
 
     return {
         "status": "ERROR",
@@ -170,6 +189,7 @@ async def list_incidents(request: Request) -> dict[str, Any]:
         "tick": snapshot.tick,
         "count": len(incidents),
         "incidents": [i.to_dict() for i in incidents],
+        **degraded_fields(request),
     }
 
 
@@ -192,6 +212,7 @@ async def get_incident(incident_id: str, request: Request) -> dict[str, Any]:
                 "incident": incident.to_dict(),
                 "anomalies": [a.to_dict() for a in members],
                 "explanation": explanation.to_dict(),
+                **degraded_fields(request),
             }
 
     return {
@@ -232,6 +253,7 @@ async def explain_anomaly(anomaly_id: str, request: Request) -> dict[str, Any]:
                 "status": "OK",
                 "anomaly": anomaly.to_dict(),
                 "explanation": explanation.to_dict(),
+                **degraded_fields(request),
             }
 
     return {

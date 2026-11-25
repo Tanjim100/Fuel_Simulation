@@ -41,6 +41,23 @@ def _env_str(name: str, default: str) -> str:
     return raw.strip()
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean environment flag.
+
+    Accepts the spellings people actually type: ``1``/``0``, ``true``/``false``,
+    ``yes``/``no``, ``on``/``off`` -- case-insensitively.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    normalised = raw.strip().lower()
+    if normalised in ("1", "true", "yes", "on"):
+        return True
+    if normalised in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """Resolved backend configuration."""
@@ -54,6 +71,21 @@ class Settings:
     # -- upstream client ---------------------------------------------------- #
     request_timeout: float = 3.0
     max_retries: int = 3
+
+    # -- circuit breaker ---------------------------------------------------- #
+    #: Consecutive *retryable* upstream failures before the breaker opens.
+    #:
+    #: Retryable means a timeout, an injected 503, or a transport error. A
+    #: 404/409/422 is the simulator *answering* -- it understood the request
+    #: and said no -- so it never counts towards this threshold. Counting it
+    #: would take the whole backend down because one station's tank was full.
+    breaker_failure_threshold: int = 5
+    #: How long the breaker stays OPEN before it allows one probe through.
+    #: Long enough that a brief outage does not flap the breaker, short
+    #: enough that the console is not left showing stale data for long.
+    breaker_cooldown_seconds: float = 15.0
+    #: Set false to disable the breaker entirely (it still counts).
+    breaker_enabled: bool = True
 
     # -- SSE broker --------------------------------------------------------- #
     #: Seconds without an SSE event while the world has advanced -> suspected drop.
@@ -90,6 +122,12 @@ class Settings:
     # -- dispatch journal --------------------------------------------------- #
     journal_path: str = "/app/data/journal.sqlite3"
 
+    # -- dead-letter queue -------------------------------------------------- #
+    #: Where the DLQ's SQLite file lives. It must be on a durable volume.
+    dlq_path: str = "/app/data/dlq.sqlite3"
+    #: The cap on the queue. Oldest entries are evicted first.
+    dlq_max_entries: int = 1000
+
     # -- optimiser ---------------------------------------------------------- #
     #: The planning horizon, in ticks. 16 ticks == 4 hours of simulated time.
     optimizer_horizon_ticks: int = 16
@@ -106,6 +144,17 @@ class Settings:
     forecast_history_limit: int = 200
     #: The scenario's start time -- the epoch of tick 0.
     forecast_start_time: str = "2026-01-01T00:00:00+00:00"
+
+    # -- scenario ----------------------------------------------------------- #
+    #: The scenario configuration file. It carries the demand table, the
+    #: regional multipliers, the clock origin and the seed.
+    #:
+    #: This is read **at import time** by ``app.scenario`` (and therefore by
+    #: ``app.forecast``), not by ``get_settings()``, so the environment
+    #: variable must be set before the process starts -- which is what
+    #: docker-compose does. The path is relative to the project root on a
+    #: laptop and absolute inside the image.
+    scenario_path: str = "backend/scenarios/baseline.yaml"
 
     # -- anomaly detection -------------------------------------------------- #
     #: How many ticks of history the detectors compare against.
@@ -138,6 +187,9 @@ class Settings:
             backend_host=_env_str("BACKEND_HOST", "0.0.0.0"),
             request_timeout=_env_float("REQUEST_TIMEOUT", 3.0),
             max_retries=_env_int("MAX_RETRIES", 3),
+            breaker_failure_threshold=_env_int("BREAKER_FAILURE_THRESHOLD", 5),
+            breaker_cooldown_seconds=_env_float("BREAKER_COOLDOWN_SECONDS", 15.0),
+            breaker_enabled=_env_bool("BREAKER_ENABLED", True),
             sse_stale_after=_env_float("SSE_STALE_AFTER", 20.0),
             sse_recover_after=_env_float("SSE_RECOVER_AFTER", 10.0),
             watchdog_interval=_env_float("WATCHDOG_INTERVAL", 5.0),
@@ -149,6 +201,8 @@ class Settings:
             state_max_age=_env_float("STATE_MAX_AGE", 1.0),
             state_refresh_interval=_env_float("STATE_REFRESH_INTERVAL", 1.0),
             journal_path=_env_str("JOURNAL_PATH", "/app/data/journal.sqlite3"),
+            dlq_path=_env_str("DLQ_PATH", "/app/data/dlq.sqlite3"),
+            dlq_max_entries=_env_int("DLQ_MAX_ENTRIES", 1000),
             optimizer_horizon_ticks=_env_int("OPTIMIZER_HORIZON_TICKS", 16),
             optimizer_max_shipments=_env_int("OPTIMIZER_MAX_SHIPMENTS", 64),
             optimizer_safety_stock_fraction=_env_float(
@@ -159,6 +213,9 @@ class Settings:
             forecast_history_limit=_env_int("FORECAST_HISTORY_LIMIT", 200),
             forecast_start_time=_env_str(
                 "FORECAST_START_TIME", "2026-01-01T00:00:00+00:00"
+            ),
+            scenario_path=_env_str(
+                "SCENARIO_PATH", "backend/scenarios/baseline.yaml"
             ),
             anomaly_history_window=_env_int("ANOMALY_HISTORY_WINDOW", 32),
             anomaly_spike_z_threshold=_env_float(

@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 
+from ..circuit_breaker import CircuitOpen
 from ..dispatch import gate_plan
 from ..explain import explain_plan
 from ..forecast import FUEL_TYPES, build_forecast
@@ -274,7 +275,13 @@ async def execute_optimization(
     outcome = await execute_shipments(client, journal, executable)
 
     # The world changed -- pull a fresh snapshot so the next plan sees it.
-    await request.app.state.broker.refresh_snapshot()
+    # The shipments are already sent at this point, so a rejected refresh
+    # must not fail the request: the write succeeded, and the *next* request
+    # will pick up the new world when the breaker closes.
+    try:
+        await request.app.state.broker.refresh_snapshot()
+    except CircuitOpen:
+        pass
 
     explanation = explain_plan(result, gate=gated, forecast=forecast, snapshot=world)
 

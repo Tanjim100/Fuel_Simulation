@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ..simulator_client import SimulatorError
+from ..degraded import degraded_fields as _degraded_fields
+from ..degraded import read_snapshot as _fresh_snapshot
 from ..validator import (
     dispatch_committed_this_tick,
     dispatch_remaining,
@@ -17,20 +18,6 @@ from ..validator import (
 router = APIRouter(prefix="/api", tags=["state"])
 
 
-def _snapshot(request: Request):
-    """The current snapshot, refreshed if it has aged out."""
-    return request.app.state.world.current()
-
-
-async def _fresh_snapshot(request: Request):
-    """Return a snapshot, refreshing it first if it is stale."""
-    broker = request.app.state.broker
-    world = request.app.state.world
-    if world.is_stale():
-        await broker.refresh_snapshot()
-    return world.current()
-
-
 @router.get("/state")
 async def get_state(request: Request) -> dict[str, Any]:
     """The full world snapshot in one call."""
@@ -39,6 +26,7 @@ async def get_state(request: Request) -> dict[str, Any]:
         "status": "OK",
         "state": snapshot.to_dict(),
         "snapshot_age_seconds": round(snapshot.age(), 3),
+        **_degraded_fields(request),
     }
 
 
@@ -57,7 +45,12 @@ async def list_depots(request: Request) -> dict[str, Any]:
                 "dispatch_remaining": dispatch_remaining(snapshot, depot.id),
             }
         )
-    return {"status": "OK", "tick": snapshot.tick, "depots": depots}
+    return {
+        "status": "OK",
+        "tick": snapshot.tick,
+        "depots": depots,
+        **_degraded_fields(request),
+    }
 
 
 @router.get("/depots/{depot_id}")
@@ -76,6 +69,7 @@ async def get_depot(depot_id: str, request: Request) -> dict[str, Any]:
             ),
             "dispatch_remaining": dispatch_remaining(snapshot, depot.id),
         },
+        **_degraded_fields(request),
     }
 
 
@@ -107,7 +101,12 @@ async def list_stations(request: Request) -> dict[str, Any]:
                 ) == 1,
             }
         )
-    return {"status": "OK", "tick": snapshot.tick, "stations": stations}
+    return {
+        "status": "OK",
+        "tick": snapshot.tick,
+        "stations": stations,
+        **_degraded_fields(request),
+    }
 
 
 @router.get("/stations/{station_id}")
@@ -140,6 +139,7 @@ async def get_station(station_id: str, request: Request) -> dict[str, Any]:
             "route_count": len(routes),
             "is_single_connected": len(routes) == 1,
         },
+        **_degraded_fields(request),
     }
 
 
@@ -157,7 +157,12 @@ async def list_routes(request: Request) -> dict[str, Any]:
                 "is_single_connected": len(station_routes) == 1,
             }
         )
-    return {"status": "OK", "tick": snapshot.tick, "routes": routes}
+    return {
+        "status": "OK",
+        "tick": snapshot.tick,
+        "routes": routes,
+        **_degraded_fields(request),
+    }
 
 
 @router.get("/allocations")
@@ -168,6 +173,7 @@ async def list_allocations(request: Request) -> dict[str, Any]:
         "status": "OK",
         "tick": snapshot.tick,
         "allocations": [a.model_dump() for a in snapshot.allocations],
+        **_degraded_fields(request),
     }
 
 
@@ -179,7 +185,12 @@ async def get_allocation(allocation_id: int, request: Request) -> dict[str, Any]
         raise HTTPException(
             status_code=404, detail=f"unknown allocation {allocation_id}"
         )
-    return {"status": "OK", "tick": snapshot.tick, "allocation": allocation.model_dump()}
+    return {
+        "status": "OK",
+        "tick": snapshot.tick,
+        "allocation": allocation.model_dump(),
+        **_degraded_fields(request),
+    }
 
 
 @router.get("/metrics")
@@ -210,6 +221,7 @@ async def get_metrics(request: Request) -> dict[str, Any]:
                 1 for s in snapshot.stations if s.status != "OPEN"
             ),
         }
+    payload.update(_degraded_fields(request))
     return payload
 
 
@@ -220,6 +232,7 @@ async def list_supply_arrivals(request: Request) -> dict[str, Any]:
         "status": "OK",
         "tick": snapshot.tick,
         "supply_arrivals": [s.model_dump() for s in snapshot.supply_arrivals],
+        **_degraded_fields(request),
     }
 
 
@@ -231,4 +244,5 @@ async def list_domain_events(request: Request) -> dict[str, Any]:
         "status": "OK",
         "tick": snapshot.tick,
         "events": [e.model_dump() for e in snapshot.events],
+        **_degraded_fields(request),
     }

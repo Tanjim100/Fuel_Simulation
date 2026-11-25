@@ -27,14 +27,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from .anomaly import AnomalyConfig, AnomalyDetector
 from .broker import EventBroker
+from .circuit_breaker import BreakerState, CircuitBreaker
 from .config import Settings, get_settings
+from .dlq import DeadLetterQueue
 from .errors import register_error_handlers
 from .journal import DispatchJournal
+from .metrics import (
+    CIRCUIT_STATE,
+    CIRCUIT_TRANSITIONS,
+    FALLBACK_ACTIVATIONS,
+    HTTP_DURATION,
+    HTTP_REQUESTS,
+    UPSTREAM_DURATION,
+    UPSTREAM_REQUESTS,
+    install_http_middleware,
+)
 from .routers import allocations as allocations_router
 from .routers import anomaly as anomaly_router
+from .routers import dlq as dlq_router
 from .routers import events as events_router
 from .routers import forecast as forecast_router
 from .routers import health as health_router
+from .routers import observability as observability_router
 from .routers import optimizer as optimizer_router
 from .routers import state as state_router
 from .simulator_client import SimulatorClient
@@ -63,7 +77,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         max_retries=settings.max_retries,
     )
     await client.connect_redis()
-    app.state.client = client
+
+    # The breaker *wraps* the client rather than replacing it. The client
+    # file must stay byte-identical to the verifier's reference copy (the
+    # drift guard in tests/test_client_parity.py enforces it), and a policy
+    # layer belongs outside transport anyway.
+    #
+    # ``app.state.client`` is the breaker, so every existing consumer is
+    # protected without touching it. ``app.state.simulator_client`` is the
+    # raw client, for the few callers that must bypass the breaker: the
+    # admin endpoints, the health probe, and the breaker itself.
+    breaker = CircuitBreaker(
+        client,
+        failure_threshold=settings.breaker_failure_threshold,
+        cooldown_seconds=settings.breaker_cooldown_seconds,
+        enabled=settings.breaker_enabled,
+        on_state_change=_on_breaker_state_change,
+        on_call=_on_breaker_call,
+    )
+    app.state.breaker = breaker
+    app.state.simulator_client = client
+    app.state.client = breaker
 
     world = WorldStateCache(max_age=settings.state_max_age)
     app.state.world = world
@@ -88,8 +122,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     )
 
-    broker = EventBroker(client, world, settings, observations=observations)
+    broker = EventBroker(
+        client, world, settings, observations=observations, breaker=breaker
+    )
     app.state.broker = broker
+
+    # The dead-letter queue. It has to exist *before* the broker starts, so
+    # a malformed frame that arrives on the very first event has somewhere
+    # to go. A payload that cannot be used is quarantined, not dropped and
+    # not raised -- an event feed that dies on one bad frame is an event
+    # feed that stops delivering events.
+    dlq: DeadLetterQueue | None = None
+    try:
+        dlq = DeadLetterQueue(
+            settings.dlq_path,
+            max_entries=settings.dlq_max_entries,
+            redis=getattr(client, "_redis", None),
+        )
+        dlq.connect()
+        app.state.dlq = dlq
+        broker.dlq = dlq
+    except Exception as exc:  # pragma: no cover - the DLQ is best-effort
+        LOGGER.warning("Dead-letter queue unavailable: %s", exc)
+        app.state.dlq = None
 
     journal: DispatchJournal | None = None
     try:
@@ -143,6 +198,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await client.aclose()
 
 
+def _on_breaker_state_change(state: BreakerState) -> None:
+    """Record a circuit breaker transition in the metrics."""
+    CIRCUIT_STATE.set(state.gauge_value)
+    CIRCUIT_TRANSITIONS.inc(to_state=state.value)
+    if state is BreakerState.OPEN:
+        FALLBACK_ACTIVATIONS.inc(kind="breaker_open")
+    LOGGER.warning("Circuit breaker is now %s", state.value)
+
+
+def _on_breaker_call(outcome: str, duration_seconds: float) -> None:
+    """Record one upstream call in the metrics.
+
+    The breaker is the single choke point through which every simulator call
+    passes, so instrumenting it instruments the upstream completely -- no
+    per-call-site instrumentation, and no way to forget a call site.
+    """
+    UPSTREAM_REQUESTS.inc(outcome=outcome)
+    UPSTREAM_DURATION.observe(duration_seconds)
+
+
 def _allocation_request(payload: dict[str, Any]):
     """Rebuild an :class:`AllocationRequest` from a journalled payload."""
     from .simulator_client import AllocationRequest
@@ -185,6 +260,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_error_handlers(app)
 
+    # The Prometheus exposition lives at a **bare** ``/metrics`` -- no
+    # ``/api`` prefix. ``/api/metrics`` already exists and returns the
+    # simulator's business KPIs as JSON for the console; repurposing it
+    # would break the console's contract. Two endpoints, two purposes.
+    app.include_router(observability_router.router)
+
     app.include_router(health_router.router)
     app.include_router(state_router.router)
     app.include_router(events_router.router)
@@ -192,6 +273,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(optimizer_router.router)
     app.include_router(anomaly_router.router)
     app.include_router(forecast_router.router)
+    app.include_router(dlq_router.router)
 
     @app.get("/", tags=["meta"])
     async def root() -> dict[str, Any]:
@@ -226,8 +308,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "GET  /api/forecast, /api/forecast/{station_id}",
                 "GET  /api/forecast/summary",
                 "GET  /api/forecast/validate",
+                "GET  /api/observability",
+                "GET  /api/dlq, /api/dlq/{id}/retry",
+                "GET  /metrics  (Prometheus exposition)",
             ],
         }
+
+    # Installed last, so it is the outermost middleware: it observes the
+    # total request time, including whatever the error handlers do.
+    install_http_middleware(app)
 
     return app
 

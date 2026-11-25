@@ -44,6 +44,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Mapping, Optional, Sequence
 
+from .scenario import ScenarioConfig, load_scenario
+
 __all__ = [
     "FORECAST_START_TIME",
     "TICK_MINUTES",
@@ -52,6 +54,7 @@ __all__ = [
     "DemandProfile",
     "PROFILES",
     "REGION_DEMAND_FACTORS",
+    "SCENARIO",
     "StockoutRisk",
     "ForecastBundle",
     "Projection",
@@ -68,10 +71,25 @@ __all__ = [
 
 
 # --------------------------------------------------------------------------- #
+# The scenario
+#
+# The demand table, the regional multipliers and the clock origin all come
+# from a structured config file (``backend/scenarios/baseline.yaml``) that
+# the loader validates at boot. They used to be Python literals here, which
+# meant the scenario could not be changed without a code change -- exactly
+# what PDF §19 ("do not hard-code") rules out.
+#
+# The public names below are unchanged, so every existing import and test
+# keeps working; only their *source* changed.
+# --------------------------------------------------------------------------- #
+SCENARIO: ScenarioConfig = load_scenario()
+
+
+# --------------------------------------------------------------------------- #
 # Constants
 # --------------------------------------------------------------------------- #
-FORECAST_START_TIME = "2026-01-01T00:00:00+00:00"
-TICK_MINUTES = 15
+FORECAST_START_TIME = SCENARIO.start_time
+TICK_MINUTES = SCENARIO.tick_minutes
 TICKS_PER_DAY = 96  # 24 hours / 15 minutes
 FUEL_TYPES: tuple[str, ...] = ("DIESEL", "PETROL", "OCTANE")
 
@@ -84,7 +102,7 @@ EPS = 1e-6
 
 
 # --------------------------------------------------------------------------- #
-# The scenario table (baseline.yaml, seed 12345)
+# The scenario table (from backend/scenarios/baseline.yaml)
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class DemandProfile:
@@ -96,33 +114,16 @@ class DemandProfile:
 
 
 PROFILES: dict[str, DemandProfile] = {
-    "urban_high": DemandProfile(
-        name="urban_high",
-        daily_liters={"DIESEL": 8500.0, "PETROL": 10500.0, "OCTANE": 5600.0},
-        noise=0.10,
-    ),
-    "industrial": DemandProfile(
-        name="industrial",
-        daily_liters={"DIESEL": 14000.0, "PETROL": 4500.0, "OCTANE": 2200.0},
-        noise=0.08,
-    ),
-    "highway": DemandProfile(
-        name="highway",
-        daily_liters={"DIESEL": 10500.0, "PETROL": 11000.0, "OCTANE": 6200.0},
-        noise=0.12,
-    ),
-    "regional": DemandProfile(
-        name="regional",
-        daily_liters={"DIESEL": 7200.0, "PETROL": 7600.0, "OCTANE": 3600.0},
-        noise=0.10,
-    ),
+    name: DemandProfile(
+        name=name,
+        daily_liters=dict(profile["daily_liters"]),
+        noise=float(profile["noise"]),
+    )
+    for name, profile in SCENARIO.profiles.items()
 }
 
-#: Per-region demand multipliers from baseline.yaml.
-REGION_DEMAND_FACTORS: dict[str, float] = {
-    "region-dhaka": 1.00,
-    "region-chattogram": 1.08,
-}
+#: Per-region demand multipliers, from the scenario config.
+REGION_DEMAND_FACTORS: dict[str, float] = dict(SCENARIO.regions)
 
 
 # --------------------------------------------------------------------------- #
@@ -781,10 +782,10 @@ def build_forecast(
     """
     instance = getattr(snap, "instance", None)
     if seed is None:
-        seed = int(getattr(instance, "seed", 12345))
+        seed = int(getattr(instance, "seed", SCENARIO.seed))
     if start_time is None:
-        start_time = str(getattr(instance, "sim_time", FORECAST_START_TIME))
-        # The instance's sim_time is the *current* time, not the start.
+        # The instance's sim_time is the *current* time, not the start, so
+        # the origin always comes from the scenario config.
         start_time = FORECAST_START_TIME
     if tick_minutes is None:
         tick_minutes = int(getattr(instance, "tick_minutes", TICK_MINUTES))

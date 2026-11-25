@@ -22,6 +22,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .circuit_breaker import CircuitOpen
 from .models import ErrorBody, ErrorResponse
 from .simulator_client import (
     SimulatorConflict,
@@ -102,6 +103,11 @@ def _status_for_simulator_error(exc: SimulatorError) -> tuple[int, str, dict[str
         return 422, exc.code or "VALIDATION_ERROR", diagnostics
     if isinstance(exc, SimulatorFaultInjected):
         return 503, exc.code or "FAULT_INJECTED", diagnostics
+    if isinstance(exc, CircuitOpen):
+        # The breaker rejected without touching the wire. From the caller's
+        # point of view this is the same situation as an injected fault --
+        # the upstream is not answering -- so it gets the same 503.
+        return 503, exc.code or "CIRCUIT_OPEN", diagnostics
     if isinstance(exc, SimulatorTimeout):
         return 504, exc.code or "SIMULATOR_TIMEOUT", diagnostics
     if isinstance(exc, SimulatorError):
@@ -123,7 +129,13 @@ def register_error_handlers(app: FastAPI) -> None:
         http_status, code, diagnostics = _status_for_simulator_error(exc)
         headers = {}
         if http_status == 503:
-            headers["Retry-After"] = "1"
+            # An open breaker knows exactly how long the caller should wait;
+            # anyone else gets a generic second.
+            retry_after = getattr(exc, "retry_after", None)
+            headers["Retry-After"] = (
+                str(int(retry_after)) if isinstance(retry_after, (int, float))
+                else "1"
+            )
         LOGGER.warning("Simulator error surfaced: %s (%s)", code, exc)
         return JSONResponse(
             status_code=http_status,

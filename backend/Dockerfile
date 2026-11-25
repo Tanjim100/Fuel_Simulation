@@ -15,6 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/app ./app
 COPY backend/tests ./tests
 
+# The scenario configuration. It is the source of truth for the demand table,
+# the regional multipliers, the clock origin and the seed -- see
+# `docs/SCENARIO.md`. The path below must match `SCENARIO_PATH`.
+COPY backend/scenarios ./scenarios
+ENV SCENARIO_PATH=/app/scenarios/baseline.yaml
+
 # The reference client, so the drift guard (tests/test_client_parity.py) can
 # compare it against the backend's copy inside the container. The build context
 # is the project root for this reason.
