@@ -159,8 +159,9 @@ preserved, and the §16 fields were added:
     "prediction_service": {"state": "HEALTHY"},
     "decision_engine":    {"state": "HEALTHY"}
   },
-  "latency": {"p95_seconds": 0.041, "error_rate": 0.004},
-  "circuit": {"state": "CLOSED", "failures": 0}
+  "latency":  {"p95_seconds": 0.041, "p50_seconds": 0.009},
+  "requests": {"total": 12681, "errors": 0, "error_rate": 0.004},
+  "circuit":  {"state": "CLOSED", "failures": 0}
 }
 ```
 
@@ -374,7 +375,7 @@ of bug in a tool whose whole job is reporting.
 | Suite | It reported | It should report |
 | :--- | :--- | :--- |
 | verifier | `4/4` | `49 checks passed` |
-| backend | `457 passed,` | `457 passed, 8 skipped, …` |
+| backend | `457 passed,` | `462 passed, 8 skipped, …` |
 | frontend | *(empty)* | `Tests  136 passed \| 3 skipped (139)` |
 
 The verifier's `4/4` was the **last of six groups**, not the total. The
@@ -383,6 +384,57 @@ backend's grep stopped at the first comma. The frontend's grep looked for
 
 All three now parse the suites' own summary lines rather than guessing at a
 pattern. The verdict was always correct; only the *evidence* was wrong.
+
+### Bug 15 — The settings' defaults contradicted the compose file
+
+The code's defaults for three tunables did not match the values the stack is
+actually deployed with.
+
+| Setting | Code default | Compose value |
+| :--- | ---: | ---: |
+| `SSE_STALE_AFTER` | 20.0 | 45.0 |
+| `POLL_INTERVAL` | 2.0 | 5.0 |
+| `STATE_MAX_AGE` | 1.0 | 15.0 |
+
+**That gap was not cosmetic.** `STATE_MAX_AGE` is the snapshot's TTL and
+`POLL_INTERVAL` is how often the world is re-read. A TTL *below* the poll
+interval marks a healthy world stale for most of every poll cycle — the false
+"Stale data" banner this pair was tuned to avoid. Under the code defaults the
+TTL was **half** the poll interval, so the bug was structurally guaranteed for
+anyone running the backend outside Docker.
+
+The deployed behaviour was always correct — the compose file's values win under
+`docker compose up`. The bug was in the *other* path the docstring promises:
+running the backend directly, where the code defaults are what you get.
+
+The fix makes the code defaults **equal** the compose values, so the two paths
+agree. And the equivalence is now **pinned**:
+
+```python
+# backend/tests/test_config_defaults.py
+PINNED = ("SSE_STALE_AFTER", "POLL_INTERVAL", "STATE_MAX_AGE")
+
+def test_the_code_default_matches_the_compose_value(...):
+    """The code's default must equal what the stack is deployed with."""
+
+def test_the_snapshot_ttl_exceeds_the_poll_interval():
+    """A TTL below the poll interval marks a healthy world stale."""
+    assert settings.state_max_age > settings.poll_interval
+```
+
+The guard reads `docker-compose.yml` directly, which means the compose file had
+to be **baked into the backend image**:
+
+```dockerfile
+COPY docker-compose.yml ./reference/docker-compose.yml
+```
+
+The test prefers `/app/reference/docker-compose.yml` and falls back to the
+project root, so it runs identically in-container and on the host.
+
+The drift was proven, not assumed: changing `STATE_MAX_AGE` back to `1.0`
+failed the guard, and restoring it passed. A regression test that has never
+failed is not a regression test.
 
 ---
 
@@ -397,7 +449,7 @@ Three named, meaningful application paths. **k6** is the primary tool; a
 | Workload | Path | Requests | Errors | avg | p50 | p95 | p99 | Throughput |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | **W1 — decision** | `POST /api/optimize` | 1377 | 0 | 209.0 ms | 202.3 | 249.3 | 269.3 | 45.5 req/s |
-| **W2 — dashboard read** | `GET /api/stations` + `/api/state` | 5930 | 0 | 6.2 ms | 5.0 | 13.6 | 22.8 | 197.4 req/s |
+| **W2 — dashboard read** | `GET /api/stations` | 5930 | 0 | 6.2 ms | 5.0 | 13.6 | 22.8 | 197.4 req/s |
 | **W3 — console mix** | weighted read mix + an SSE subscriber | 5903 | 0 | 6.3 ms | 5.1 | 15.2 | 23.3 | 184.1 req/s |
 
 **Zero errors across all three.** Resource usage: CPU 0.40–0.47 % on W1/W2,
@@ -451,7 +503,7 @@ change.
 | Gate | Before | After |
 | :--- | --- | --- |
 | Verifier checks | 49/49 | **49/49** |
-| Backend tests | 338 passed, 8 skipped | **457 passed, 8 skipped** |
+| Backend tests | 338 passed, 8 skipped | **462 passed, 8 skipped** |
 | Frontend tests | 132 passed, 3 skipped | **136 passed, 3 skipped** |
 | Healthy services | 5 | **5** |
 | Prometheus targets | — | `backend: up ok` |
@@ -531,7 +583,7 @@ The harness's verdict on a green stack:
   "duration_seconds": 220,
   "suites": {
     "verifier":      {"status": "passed", "summary": "49 checks passed"},
-    "backend_tests": {"status": "passed", "summary": "457 passed, 8 skipped, …"},
+    "backend_tests": {"status": "passed", "summary": "462 passed, 8 skipped, …"},
     "frontend_tests":{"status": "passed", "summary": "Tests  136 passed | 3 skipped (139)"},
     "observability": {"status": "passed", "summary": "checked 46 assertions"},
     "load_test":     {"status": "passed", "report": "loadtest/results/….json"}
@@ -623,10 +675,10 @@ demo.
 > the forecast oracle and the console's no-invented-numbers test are reusable
 > as a **regression suite** for every subsequent change — run all of them
 > after each commit to guarantee no integration contract has been broken.
-> Today they caught **eight** real bugs (Bug 7 through Bug 14 in §3), plus
+> Today they caught **nine** real bugs (Bug 7 through Bug 15 in §3), plus
 > the `SYSTEM_DESIGN.md` drift that a fresh reader found.
 >
-> Three of the eight (Bugs 12, 13 and 14) were found by *the harness itself*,
+> Three of the nine (Bugs 12, 13 and 14) were found by *the harness itself*,
 > which is the strongest argument for building one: the stranded coroutine
 > surfaced as a `RuntimeWarning`, the broken frontend invocation surfaced as a
 > `FAIL` verdict, and the wrong summaries surfaced as numbers that did not

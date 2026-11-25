@@ -47,7 +47,7 @@ Three scenarios, each a named, meaningful application path.
 | :--- | :--- | :--- | :--- |
 | **W1** | Decision path | `POST /api/optimize` | The end-to-end decision request: forecast + optimise + gate. The platform's reason for existing. |
 | **W2** | Dashboard read | `GET /api/stations` | What the console polls every 5 seconds. This is the path that exposed the simulator connection-pool wedge. |
-| **W3** | Console-equivalent mix | weighted mix of `/api/state` (40), `/api/stations` (25), `/api/forecast/summary` (15), `/api/anomalies` (10), `/api/incidents` (10) + 1 SSE subscriber | Reproduces the console's real polling *and* streaming load, together. |
+| **W3** | Console-equivalent mix | weighted mix of `/api/state` (40), `/api/stations` (25), `/api/forecast/summary` (15), `/api/anomalies/summary` (10), `/api/metrics` (10) + 1 SSE subscriber | Reproduces the console's real polling *and* streaming load, together. |
 
 **Parameters** (all recorded in the report): duration, VUs, concurrency, the
 base URL, the host, and the tool that produced the run.

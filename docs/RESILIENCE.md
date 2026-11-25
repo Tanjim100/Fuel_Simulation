@@ -11,9 +11,11 @@ This document is the clear, demonstrable behavior.
 
 ## The problem the breaker solves
 
-The simulator client already retries: 3 attempts, full jitter, a 4-second
-ceiling per attempt. So **one logical call can block for roughly 13.75
-seconds**.
+The simulator client already retries: **4 attempts** (the initial try plus
+`max_retries=3`), each with a **3-second timeout**, separated by exponential
+backoff with full jitter. So **one logical call can block for roughly 13.75
+seconds** — 4 × 3 s of timeout, plus at most 0.25 s + 0.5 s + 1.0 s of
+backoff.
 
 That retry budget is right for one flaky request and catastrophic for a
 service. If the upstream is genuinely down, *every* request pays the full
@@ -106,7 +108,7 @@ HALF_OPEN ──(one failure)─────────────────
 | :--- | :--- | ---: | :--- |
 | `breaker_failure_threshold` | `BREAKER_FAILURE_THRESHOLD` | 5 | Consecutive retryable failures before opening. |
 | `breaker_cooldown_seconds` | `BREAKER_COOLDOWN_SECONDS` | 15.0 | How long to stay OPEN before probing. |
-| `breaker_enabled` | — | true | Off: count only, never transition. |
+| `breaker_enabled` | `BREAKER_ENABLED` | true | Off: count only, never transition. |
 
 ### Two details that matter
 

@@ -26,6 +26,11 @@ ENV SCENARIO_PATH=/app/scenarios/baseline.yaml
 # is the project root for this reason.
 COPY verifier/simulator_client.py ./reference/simulator_client.py
 
+# The compose file, so the settings' drift guard (tests/test_config_defaults.py)
+# can check that the code's defaults agree with the values the stack is
+# actually deployed with. Same reason: the build context is the project root.
+COPY docker-compose.yml ./reference/docker-compose.yml
+
 RUN mkdir -p /app/data
 
 EXPOSE 8002

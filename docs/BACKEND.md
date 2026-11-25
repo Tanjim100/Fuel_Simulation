@@ -430,6 +430,21 @@ reconnect attempt.
 
 All settings are environment-driven (`backend/app/config.py`).
 
+**The defaults in this table are the code's defaults, and they are the same
+numbers `docker-compose.yml` sets.** That equivalence is not a coincidence —
+it is pinned by `backend/tests/test_config_defaults.py`, which reads the
+compose file and fails if the two drift apart. It matters because the
+defaults are what you get when running the backend *outside* Docker
+(`uvicorn app.main:app`), and a default that disagrees with the deployed
+value is a bug waiting for the person who runs it that way.
+
+The one that bit: `STATE_MAX_AGE` (the snapshot TTL) was `1.0` in code while
+the compose file set `15.0`, and `POLL_INTERVAL` was `2.0` against a compose
+`5.0`. A TTL below the poll interval marks a healthy world stale for most of
+every poll cycle — the false "Stale data" banner the pair was tuned to
+avoid. Under Docker the compose values won, so the deployed platform was
+never affected; under a bare `uvicorn` the bug was structurally guaranteed.
+
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
 | `SIMULATOR_BASE_URL` | `http://simulator-api:8000` | Upstream base URL |

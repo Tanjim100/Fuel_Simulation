@@ -86,7 +86,7 @@ backend_http_requests_total{method="GET",path="/api/stations/{station_id}",statu
 Without this, `/api/stations/station-mirpur` and `/api/stations/station-tongi`
 become separate time series and the metric cardinality explodes — a scanner
 probing random URLs would create an unbounded number of series. Unmatched
-paths fall back to `"unmatched"`, and a path longer than 120 characters is
+paths fall back to `"unmatched"`, and a path longer than 64 characters is
 capped to the same value.
 
 ### Declared-but-absent
@@ -199,7 +199,7 @@ and the new ones are added alongside.
     "prediction_service":  {"state": "HEALTHY"},
     "decision_engine":     {"state": "HEALTHY"}
   },
-  "latency":  {"p95_seconds": 0.024, "p50_seconds": 0.004, "avg_seconds": 0.006},
+  "latency":  {"p95_seconds": 0.024, "p50_seconds": 0.004},
   "requests": {"total": 12681, "errors": 0, "error_rate": 0.0},
   "circuit":  {"state": "CLOSED", "consecutive_failures": 0, "total_rejections": 0},
   "upstream": {"reachable": true, "status": "ok", "error": null},
@@ -211,6 +211,12 @@ and the new ones are added alongside.
 The component states come from a known set — `HEALTHY`, `DEGRADED`,
 `UNHEALTHY`, `UNKNOWN`, `DISABLED` — so a dashboard's colour mapping cannot
 break on an unexpected string.
+
+**`avg_seconds` is not in `/api/health`.** It is in `/api/observability`,
+which is the endpoint that carries the *instrumentation* mirror; `/api/health`
+carries the §16 table, and §16 asks for p95 and an error rate. The console's
+System tab reads the observability mirror, so it is the one that shows the
+average.
 
 ### Two claims, deliberately kept apart
 

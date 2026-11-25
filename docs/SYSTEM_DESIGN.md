@@ -287,8 +287,7 @@ The full endpoint list is in `docs/BACKEND.md`. The ones that matter most:
 | `GET /api/state` | The world: depots, stations, routes, allocations. |
 | `GET /api/metrics` | The simulator's business KPIs, as JSON. **The console's contract.** |
 | `GET /api/forecast/summary` | The forecast, condensed for the console. |
-| `GET /api/optimize` | The plan and its explanation. |
-| `POST /api/optimize` | Recompute the plan. Read-only. |
+| `POST /api/optimize` | Compute the plan and its explanation. Read-only. |
 | `POST /api/optimize/execute` | Dispatch. Writes. |
 | `POST /api/plan` | Validate and split a request. **Never writes.** |
 | `POST /api/allocations` | Validate, split and dispatch. |

@@ -867,7 +867,8 @@ failing, and tripping on them would take the backend down for one bad request.
     │       ├── optimizer.py       # /api/optimize, .../execute, .../solver, .../llm
     │       ├── forecast.py        # /api/forecast, .../summary, .../{id}, .../validate
     │       ├── anomaly.py         # /api/anomalies, /api/incidents, .../explain
-    │       └── observability.py   # /metrics, /api/observability, /api/dlq
+    │       ├── observability.py   # /metrics, /api/observability
+    │       └── dlq.py             # /api/dlq, /api/dlq/{id}/retry
     └── tests/
         ├── test_validator.py                      # pure unit tests, no simulator
         ├── test_validator_against_simulator.py   # oracle + randomised differential test
@@ -876,7 +877,7 @@ failing, and tripping on them would take the backend down for one bad request.
         ├── test_client_parity.py                  # drift guard
         ├── test_forecast.py                       # forecast unit tests + golden fixture oracle
         ├── test_optimizer.py                      # constraint + determinism properties
-        ├── test_optimizer_vs_greedy.py            # never worse than the naive baseline
+        │                                          #   + never worse than the naive baseline
         ├── test_optimizer_against_simulator.py    # the live simulator as oracle
         ├── test_optimizer_api.py                  # optimiser HTTP surface
         ├── test_forecast_api.py                   # forecast HTTP surface + validate oracle
