@@ -102,7 +102,12 @@ async def create_allocations(
         raise PlanRejected(
             code=plan.reject_code or "REJECTED",
             message=plan.reject_message or "The request cannot be dispatched.",
-            http_status=409,
+            # The validator decided which status this rejection implies: a
+            # 404 for an unknown entity, a 422 for a malformed request, and
+            # a 409 only for a genuine business conflict. Using the plan's
+            # own status is what lets a client tell "that station does not
+            # exist" apart from "that route is over capacity".
+            http_status=plan.http_status,
             diagnostics=plan.diagnostics,
             explanation=(
                 plan.explanation.model_dump() if plan.explanation else {}

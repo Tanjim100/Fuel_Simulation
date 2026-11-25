@@ -15,11 +15,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from ..degraded import degraded_fields, read_snapshot
 from ..explain import explain_stockout_risk
-from ..metrics import FORECAST_ERROR, FORECAST_VALIDATION, SHORTAGE_ALERTS
+from ..metrics import FORECAST_ERROR, FORECAST_VALIDATION
 from ..forecast import (
     DEMAND_TOLERANCE,
     FUEL_TYPES,
@@ -275,14 +275,7 @@ async def get_station_forecast(
 
     station = snapshot.station(station_id)
     if station is None:
-        return {
-            "status": "ERROR",
-            "error": {
-                "code": "NOT_FOUND",
-                "message": f"unknown station {station_id!r}",
-                "http_status": 404,
-            },
-        }
+        raise HTTPException(status_code=404, detail=f"unknown station {station_id!r}")
 
     series = {
         fuel: forecast.demand.get((station_id, fuel), [])

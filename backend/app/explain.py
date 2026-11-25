@@ -42,7 +42,13 @@ __all__ = [
 EPS = 1e-6
 
 #: A number in prose: an optional sign, digits, optional decimals.
-_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+#:
+#: The lookarounds keep a digit *inside* an identifier out of the match.
+#: Without them, "route R12" yielded the number 12 -- so prose mentioning a
+#: legitimate route or station id was rejected as unsafe, because the audit
+#: found a number that was not in the declared set. Real numbers are still
+#: found: "1250 L (about 12.5%)" gives both.
+_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?![A-Za-z0-9])")
 
 
 def _qty(value: float) -> float:

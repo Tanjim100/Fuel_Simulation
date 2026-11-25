@@ -43,8 +43,8 @@ So there are three endpoints, three jobs:
 `backend/app/metrics.py` is a **hand-rolled** Prometheus text writer. The
 `prometheus_client` package is not a dependency, on purpose:
 
-- The PDF says the stack is the team's choice. A hand-rolled writer is about
-  400 lines with **zero new dependencies**, and the backend image stays slim
+- The PDF says the stack is the team's choice. A hand-rolled writer is under
+  800 lines with **zero new dependencies**, and the backend image stays slim
   and offline-buildable.
 - The writer is small enough to be *read*, and reading it is how the team
   knows the exposition is correct.
@@ -121,7 +121,7 @@ So a dashboard can show "0 fallbacks" rather than a gap.
 | `backend_http_request_duration_seconds` | histogram | `method`, `path` | The latency distribution. Buckets 0.005s … 10s. |
 | `backend_upstream_requests_total` | counter | `outcome` | Every call to the simulator, by outcome. |
 | `backend_upstream_request_duration_seconds` | histogram | — | How long the upstream takes. |
-| `backend_upstream_retries_total` | counter | `reason` | Retries the client issued. |
+| `backend_upstream_retries_total` | — | — | **Deliberately absent.** The client retries *inside* itself, below the breaker's choke point, so the backend cannot see a retry. The proxy for a slow or flaky upstream is the duration histogram and the `timeout` / `transport_error` outcomes. |
 
 The `outcome` label takes: `success`, `timeout`, `fault_injected`,
 `transport_error`, `not_found`, `conflict`, `validation_error`,
@@ -153,7 +153,7 @@ This is the layer that would have caught the pool wedge.
 | `backend_decisions_total` | counter | `kind` | `plan` / `dispatch` / `cancel`. |
 | `backend_fallback_activations_total` | counter | `kind` | `degraded_mode` / `poll_fallback` / `breaker_open` / `forecast_fallback`. |
 | `backend_anomalies_total` | counter | `kind`, `severity` | Anomalies detected. |
-| `backend_incidents_total` | counter | — | Incidents opened from grouped anomalies. |
+| `backend_incidents_total` | counter | `severity` | Incidents opened from grouped anomalies. |
 
 **On `backend_decisions_total`.** A plan is a *decision request*, so it is
 counted whether it was accepted or rejected — a run of rejections is itself
@@ -162,6 +162,23 @@ a finding.
 **On `backend_fallback_activations_total`.** PDF §15 names it explicitly. A
 non-zero count is **not** an error: it is the record of the system choosing
 to serve a degraded answer rather than no answer at all.
+
+**On the three "detected" counters.** `backend_shortage_alerts_total`,
+`backend_anomalies_total` and `backend_incidents_total` count each finding
+**once**, when it is first detected — not once per read.
+
+This distinction is load-bearing. The detectors recompute against the live
+world on *every* request, so the same anomaly is recomputed on every poll.
+Incrementing there would make the alert rate a function of how often the
+console refreshed: three polls moved
+`backend_shortage_alerts_total{severity="HIGH"}` from 7.0 to 10.0. A
+dashboard plotting that is plotting **the viewer's polling rate**, not the
+world's alert rate.
+
+A tracker remembers what it has already counted and resets when the world
+advances to a new tick, so five polls of an unchanged world move nothing.
+`backend/tests/test_metrics.py` pins this.
+
 
 ### Resilience layer
 

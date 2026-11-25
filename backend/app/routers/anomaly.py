@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from ..degraded import degraded_fields, read_snapshot
 from ..anomaly import (
@@ -21,7 +21,7 @@ from ..anomaly import (
 )
 from ..explain import explain_incident, explain_stockout_risk
 from ..forecast import build_forecast
-from ..metrics import SHORTAGE_ALERTS
+from ..metrics import ANOMALY_COUNTER, INCIDENT_COUNTER, SHORTAGE_ALERT_COUNTER
 from ..state import WorldSnapshot
 
 router = APIRouter(prefix="/api", tags=["anomaly"])
@@ -99,6 +99,31 @@ def _filter(
     return out
 
 
+def _count_detected(anomalies: list[Anomaly], tick: int) -> None:
+    """Record newly-detected anomalies in the counters, once each.
+
+    Three counters are fed here:
+
+    * ``backend_anomalies_total`` -- anomalies detected, by kind.
+    * ``backend_shortage_alerts_total`` -- the shortage-alert rate PDF §15's
+      intelligence layer asks for: how many alerts of each severity were
+      raised. A rising HIGH count is a demand problem before it is an
+      inventory problem.
+    * ``backend_incidents_total`` -- incidents opened from grouped anomalies.
+
+    All three go through the "count once" trackers, so polling an unchanged
+    world increments nothing.
+    """
+    key = str(tick)
+    ANOMALY_COUNTER.count(
+        ((a.id, {"kind": a.kind, "severity": a.severity}) for a in anomalies),
+        tick=key,
+    )
+    SHORTAGE_ALERT_COUNTER.count(
+        ((a.id, {"severity": a.severity}) for a in anomalies), tick=key
+    )
+
+
 @router.get("/anomalies")
 async def list_anomalies(
     request: Request,
@@ -131,11 +156,14 @@ async def anomaly_summary(request: Request) -> dict[str, Any]:
     for anomaly in anomalies:
         by_kind[anomaly.kind] = by_kind.get(anomaly.kind, 0) + 1
         by_severity[anomaly.severity] = by_severity.get(anomaly.severity, 0) + 1
-        # The shortage-alert rate the PDF's section 15 intelligence layer
-        # asks for: how many alerts of each severity the operator was told
-        # about. A rising HIGH count is a demand problem before it is an
-        # inventory problem.
-        SHORTAGE_ALERTS.inc(severity=anomaly.severity)
+
+    # The counters are incremented **once per anomaly**, not once per read.
+    # The detectors recompute against the live world on every request, so
+    # incrementing here would make the alert rate a function of how often
+    # the console polled -- a number that rose every time a judge looked at
+    # it. The tracker remembers what it has already counted, so a poll of
+    # an unchanged world adds nothing.
+    _count_detected(anomalies, snapshot.tick)
 
     return {
         "status": "OK",
@@ -160,14 +188,7 @@ async def get_anomaly(anomaly_id: str, request: Request) -> dict[str, Any]:
                 **degraded_fields(request),
             }
 
-    return {
-        "status": "ERROR",
-        "error": {
-            "code": "NOT_FOUND",
-            "message": f"unknown anomaly {anomaly_id!r}",
-            "http_status": 404,
-        },
-    }
+    raise HTTPException(status_code=404, detail=f"unknown anomaly {anomaly_id!r}")
 
 
 @router.get("/incidents")
@@ -183,6 +204,13 @@ async def list_incidents(request: Request) -> dict[str, Any]:
         anomalies, window_ticks=settings.anomaly_incident_window_ticks
     )
     snapshot = request.app.state.world.current()
+
+    # Incidents are counted once each, like the anomalies behind them, and
+    # labelled by severity so the label set matches the other counters.
+    INCIDENT_COUNTER.count(
+        ((i.id, {"severity": i.severity}) for i in incidents),
+        tick=str(snapshot.tick),
+    )
 
     return {
         "status": "OK",
@@ -215,14 +243,7 @@ async def get_incident(incident_id: str, request: Request) -> dict[str, Any]:
                 **degraded_fields(request),
             }
 
-    return {
-        "status": "ERROR",
-        "error": {
-            "code": "NOT_FOUND",
-            "message": f"unknown incident {incident_id!r}",
-            "http_status": 404,
-        },
-    }
+    raise HTTPException(status_code=404, detail=f"unknown incident {incident_id!r}")
 
 
 @router.get("/anomalies/{anomaly_id}/explain")
@@ -256,11 +277,4 @@ async def explain_anomaly(anomaly_id: str, request: Request) -> dict[str, Any]:
                 **degraded_fields(request),
             }
 
-    return {
-        "status": "ERROR",
-        "error": {
-            "code": "NOT_FOUND",
-            "message": f"unknown anomaly {anomaly_id!r}",
-            "http_status": 404,
-        },
-    }
+    raise HTTPException(status_code=404, detail=f"unknown anomaly {anomaly_id!r}")

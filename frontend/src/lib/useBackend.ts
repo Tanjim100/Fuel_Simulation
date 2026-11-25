@@ -93,8 +93,20 @@ export function useBackend(): BackendData {
   // function without re-subscribing every time it changes.
   const refreshRef = useRef<() => void>(() => {})
 
+  // -- request sequencing ------------------------------------------------ //
+  // Two refreshes can be in flight at once: the 5s poll and an SSE nudge.
+  // Without sequencing, the *older* one can resolve after the newer one and
+  // overwrite fresher state with stale state -- the console would go
+  // backwards. Each refresh takes a ticket; only the holder of the newest
+  // ticket is allowed to write.
+  //
+  // A cancellation flag cannot do this job: the refresh function returns a
+  // cleanup, and both callers discard it, so the flag would never be set.
+  const refreshSeq = useRef(0)
+
   const refresh = useCallback(() => {
-    let cancelled = false
+    const ticket = ++refreshSeq.current
+    const isCurrent = () => ticket === refreshSeq.current
 
     const run = async () => {
       try {
@@ -110,7 +122,8 @@ export function useBackend(): BackendData {
           api.incidents(),
           api.observability(),
         ])
-        if (cancelled) return
+        // A newer refresh has started; its result is the freshest one.
+        if (!isCurrent()) return
         setHealth(h)
         setBroker(b)
         setMetrics(m)
@@ -123,17 +136,14 @@ export function useBackend(): BackendData {
         setObservability(o)
         setError(null)
       } catch (err) {
-        if (cancelled) return
+        if (!isCurrent()) return
         setError(err instanceof Error ? err.message : 'Could not reach the backend.')
       } finally {
-        if (!cancelled) setLoading(false)
+        if (isCurrent()) setLoading(false)
       }
     }
 
     void run()
-    return () => {
-      cancelled = true
-    }
   }, [])
 
   refreshRef.current = refresh

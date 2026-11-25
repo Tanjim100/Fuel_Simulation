@@ -290,10 +290,11 @@ def test_the_plan_is_recorded_in_the_journal(app_client):
 
 
 def test_an_unknown_plan_is_reported(app_client):
+    """A plan that was never journalled is a 404, not a 200."""
     response = app_client.get("/api/optimize/plan-does-not-exist")
-    assert response.status_code == 200
+    assert response.status_code == 404
     assert response.json()["status"] == "ERROR"
-    assert response.json()["error"]["code"] == "NOT_FOUND"
+    assert response.json()["error"]["http_status"] == 404
 
 
 # --------------------------------------------------------------------------- #

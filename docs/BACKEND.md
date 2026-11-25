@@ -81,6 +81,13 @@ because both questions are asked in practice.
 > **`CONSTRAINED` depots are still dispatchable.** Only `OUTAGE` and `CLOSED` are not. This
 > is easy to get wrong and would make the validator reject legal shipments.
 
+> **The status column is enforced, not merely documented.** The validator
+> decides which status each rejection implies and the router reports that
+> decision — so an unknown depot is a **404**, a negative quantity is a
+> **422**, and only a genuine business conflict is a **409**. A client can
+> therefore tell "that depot does not exist" apart from "that route is over
+> capacity" without parsing the message.
+
 ### 2.2 The simulator's ceiling order is fixed, not by magnitude
 
 **This is the single most important measured fact about the validator**, and it was caught

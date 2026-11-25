@@ -405,7 +405,15 @@ def test_posting_an_allocation_twice_is_idempotent(app_client):
     assert second["execution"]["total_litres"] == 0.0
 
 
-def test_posting_a_rejected_allocation_returns_409(app_client):
+def test_posting_an_allocation_for_an_unknown_depot_returns_404(app_client):
+    """An unknown entity is a 404, not a conflict.
+
+    The validator distinguishes three kinds of rejection: an unknown entity
+    (404), a malformed request (422), and a genuine business conflict such
+    as an over-capacity route (409). The router used to hardcode 409 for all
+    three, so a client could not tell "that depot does not exist" apart from
+    "that route is over capacity".
+    """
     response = app_client.post(
         "/api/allocations",
         json={
@@ -415,11 +423,29 @@ def test_posting_a_rejected_allocation_returns_409(app_client):
             "quantity": 1000.0,
         },
     )
-    assert response.status_code == 409
+    assert response.status_code == 404
     body = response.json()
     assert body["status"] == "ERROR"
     assert body["error"]["code"] == "NOT_FOUND"
-    assert body["error"]["http_status"] == 409
+    assert body["error"]["http_status"] == 404
+
+
+def test_posting_a_malformed_allocation_returns_422(app_client):
+    """A negative quantity is a malformed request, not a conflict."""
+    response = app_client.post(
+        "/api/allocations",
+        json={
+            "source_depot_id": "depot-dhanmondi",
+            "destination_station_id": "station-mirpur",
+            "fuel_type": "DIESEL",
+            "quantity": -500.0,
+        },
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "ERROR"
+    assert body["error"]["code"] == "INVALID_QUANTITY"
+    assert body["error"]["http_status"] == 422
 
 
 def test_cancelling_an_allocation(app_client):

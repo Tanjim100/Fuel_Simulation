@@ -156,7 +156,7 @@
     },
     {
       "type": "row",
-      "title": "System — CPU, memory, resource utilisation",
+      "title": "System — simulator load and resource utilisation",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
       "id": 101,
       "collapsed": false

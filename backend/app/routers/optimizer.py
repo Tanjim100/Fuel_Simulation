@@ -22,7 +22,7 @@ import logging
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from ..circuit_breaker import CircuitOpen
 from ..dispatch import gate_plan
@@ -384,24 +384,12 @@ async def get_plan(plan_id: str, request: Request) -> dict[str, Any]:
     """A recorded plan, from the journal."""
     journal = getattr(request.app.state, "journal", None)
     if journal is None:
-        return {
-            "status": "ERROR",
-            "error": {
-                "code": "JOURNAL_UNAVAILABLE",
-                "message": "No dispatch journal is configured.",
-                "http_status": 404,
-            },
-        }
+        raise HTTPException(
+            status_code=404, detail="No dispatch journal is configured."
+        )
 
     plan = await journal.find_plan(plan_id)
     if plan is None:
-        return {
-            "status": "ERROR",
-            "error": {
-                "code": "NOT_FOUND",
-                "message": f"unknown plan {plan_id!r}",
-                "http_status": 404,
-            },
-        }
+        raise HTTPException(status_code=404, detail=f"unknown plan {plan_id!r}")
 
     return {"status": "OK", "plan": plan.to_dict()}

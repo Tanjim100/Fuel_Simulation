@@ -324,6 +324,7 @@ def _reject(
         deferred_litres=0.0,
         reject_code=code,
         reject_message=message,
+        http_status=http_status,
         binding_constraint=binding_constraint,
         diagnostics=diagnostics or {},
         explanation=explanation,

@@ -251,9 +251,17 @@ def test_one_anomaly_can_be_fetched_by_id(spike_client):
 
 
 def test_an_unknown_anomaly_is_reported_as_not_found(client):
-    body = client.get("/api/anomalies/does-not-exist").json()
+    """A missing entity must be a real 404, not a 200 with an error body.
+
+    The endpoint used to return the error envelope inside a 200. That reads
+    as success to ``curl --fail``, to a monitoring probe, and to any client
+    that checks the status before the body.
+    """
+    response = client.get("/api/anomalies/does-not-exist")
+    assert response.status_code == 404
+    body = response.json()
     assert body["status"] == "ERROR"
-    assert body["error"]["code"] == "NOT_FOUND"
+    assert body["error"]["http_status"] == 404
 
 
 # --------------------------------------------------------------------------- #
@@ -292,9 +300,11 @@ def test_one_incident_can_be_fetched_by_id(spike_client):
 
 
 def test_an_unknown_incident_is_reported_as_not_found(client):
-    body = client.get("/api/incidents/does-not-exist").json()
+    response = client.get("/api/incidents/does-not-exist")
+    assert response.status_code == 404
+    body = response.json()
     assert body["status"] == "ERROR"
-    assert body["error"]["code"] == "NOT_FOUND"
+    assert body["error"]["http_status"] == 404
 
 
 # --------------------------------------------------------------------------- #

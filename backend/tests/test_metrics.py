@@ -547,3 +547,69 @@ def _counter_value(client, series: str) -> float:
         if line.startswith(series + " "):
             return float(line.rsplit(" ", 1)[1])
     return 0.0
+
+
+def _sum_counter(client, family: str) -> float:
+    """The total of every series of a metric family."""
+    body = client.get("/metrics").text
+    total = 0.0
+    for line in body.splitlines():
+        if line.startswith(family + "{"):
+            total += float(line.rsplit(" ", 1)[1])
+    return total
+
+
+def test_polling_an_unchanged_world_does_not_inflate_the_counters(client) -> None:
+    """A counter incremented by a *read* measures the reader, not the world.
+
+    The anomaly detectors recompute against the live world on every request,
+    so the same anomaly is recomputed on every poll. Incrementing the
+    counter there made the alert rate a function of how often the console
+    refreshed -- the number rose every time a judge looked at it.
+
+    This pins the fix: polling repeatedly adds nothing.
+    """
+    # Prime the counters, then read the same state several times.
+    client.get("/api/anomalies/summary")
+    client.get("/api/incidents")
+    before = _sum_counter(client, "backend_shortage_alerts_total")
+
+    for _ in range(5):
+        client.get("/api/anomalies/summary")
+        client.get("/api/incidents")
+
+    after = _sum_counter(client, "backend_shortage_alerts_total")
+    assert after == before, (
+        "five polls of an unchanged world changed the shortage-alert counter "
+        f"from {before} to {after}"
+    )
+
+
+def test_the_anomaly_counter_carries_both_of_its_labels(client) -> None:
+    """``backend_anomalies_total`` is labelled by kind *and* severity.
+
+    A series with only one of them is a different time series, so the
+    pre-registered zeros and the counted values would not line up.
+    """
+    client.get("/api/anomalies/summary")
+    body = client.get("/metrics").text
+    series = [
+        line for line in body.splitlines()
+        if line.startswith("backend_anomalies_total{")
+    ]
+    assert series, "the anomaly counter rendered no series at all"
+    for line in series:
+        assert 'kind="' in line, f"an anomaly series has no kind: {line}"
+        assert 'severity="' in line, f"an anomaly series has no severity: {line}"
+
+
+def test_the_incident_counter_is_pre_registered(client) -> None:
+    """``backend_incidents_total`` must render even with no incidents.
+
+    It was declared but never registered, so it rendered as a header with
+    no sample lines -- which is indistinguishable from an uninstrumented
+    metric, and made the Grafana panel show "No data".
+    """
+    body = client.get("/metrics").text
+    assert "# TYPE backend_incidents_total counter" in body
+    assert "backend_incidents_total{" in body

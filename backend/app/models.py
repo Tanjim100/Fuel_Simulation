@@ -159,6 +159,14 @@ class PlanResult(_Schema):
     deferred_litres: float = 0.0
     reject_code: Optional[str] = None
     reject_message: Optional[str] = None
+    #: The HTTP status this rejection should be reported with.
+    #:
+    #: A rejected plan is not always a conflict. An unknown station is a
+    #: 404, a malformed request is a 422, and only a genuine business
+    #: conflict -- "that route is over capacity" -- is a 409. The validator
+    #: decides which; this carries the decision to the HTTP layer, so the
+    #: status the client sees is the one the rule actually implies.
+    http_status: int = 409
     binding_constraint: Optional[BindingConstraint] = None
     diagnostics: dict[str, Any] = Field(default_factory=dict)
     warnings: list[Warning] = Field(default_factory=list)

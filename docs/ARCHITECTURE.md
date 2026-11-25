@@ -204,7 +204,7 @@ breaker is a *policy* layered over transport, and policy belongs outside.
 
 **The metrics writer is hand-rolled.**
 The `prometheus_client` package is not a dependency. A hand-rolled writer is
-about 400 lines with zero new dependencies, and the backend image stays slim
+under 800 lines with zero new dependencies, and the backend image stays slim
 and offline-buildable. It is also small enough to *read*, which is how the
 team knows the exposition is correct.
 

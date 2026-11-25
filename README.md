@@ -249,7 +249,7 @@ cannot do safely.
 
 ### The metrics
 
-`GET /metrics` — a hand-rolled Prometheus exposition, ~400 lines, **zero new
+`GET /metrics` — a hand-rolled Prometheus exposition, **zero new
 dependencies**:
 
 | Layer | The signal that matters |

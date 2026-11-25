@@ -451,10 +451,15 @@ UPSTREAM_DURATION = REGISTRY.histogram(
     "backend_upstream_request_duration_seconds",
     "Duration of a call to the simulator, in seconds.",
 )
-UPSTREAM_RETRIES = REGISTRY.counter(
-    "backend_upstream_retries_total",
-    "Retries issued by the simulator client, by reason.",
-)
+#: There is deliberately **no** `backend_upstream_retries_total` counter.
+#:
+#: The simulator client retries internally -- three retries with backoff --
+#: and that happens *inside* the client, below the breaker's choke point.
+#: The backend genuinely cannot see a retry, so a counter for one would be a
+#: permanent zero: a number that looks like data and means nothing. The
+#: proxy for "the upstream was slow or flaky" is
+#: `backend_upstream_request_duration_seconds` and the `timeout` /
+#: `transport_error` outcomes on `backend_upstream_requests_total`.
 
 # -- System layer ----------------------------------------------------------- #
 SIMULATOR_INFLIGHT = REGISTRY.gauge(
@@ -504,6 +509,74 @@ INCIDENTS = REGISTRY.counter(
     "backend_incidents_total",
     "Incidents opened from grouped anomalies.",
 )
+
+
+class _OnceCounter:
+    """Count a thing once, when it first appears -- not once per read.
+
+    A counter that a *read* endpoint increments is measuring the reader, not
+    the world. The anomaly detectors run against the live world on every
+    request, so the same anomaly is recomputed on every poll; incrementing
+    the counter there would make it a function of how often the console
+    refreshed.
+
+    This records the ids it has already counted and increments only for the
+    ones it has not seen. The first read that sees an anomaly counts it; every
+    later read of the same anomaly does not.
+
+    The set is bounded: it keeps the ids seen since the last world tick, so
+    it cannot grow without limit as the world advances.
+    """
+
+    def __init__(self, counter: "Counter", *labels: str) -> None:
+        self._counter = counter
+        self._labels = labels or ("kind",)
+        self._seen: dict[str, str] = {}
+
+    def count(
+        self, entries: Iterable[tuple[str, Mapping[str, str]]], *, tick: str
+    ) -> int:
+        """Count the entries not yet seen at this tick.
+
+        ``entries`` is a sequence of ``(id, labels)`` pairs -- the id
+        identifies the thing, the labels are the counter's label values.
+        Returns the number newly counted.
+        """
+        # A new tick means a new world: anything from an earlier tick has
+        # already been counted and cannot be counted again, so the record is
+        # replaced rather than grown.
+        if self._seen.get("_tick") != tick:
+            self._seen = {"_tick": tick}
+        newly = 0
+        for entry_id, labels in entries:
+            if entry_id in self._seen:
+                continue
+            self._seen[entry_id] = ""
+            self._counter.inc(**labels)
+            newly += 1
+        return newly
+
+
+class _SeverityOnceCounter(_OnceCounter):
+    """``_OnceCounter`` for a counter labelled by severity."""
+
+    def __init__(self, counter: "Counter") -> None:
+        super().__init__(counter, "severity")
+
+
+class _KindOnceCounter(_OnceCounter):
+    """``_OnceCounter`` for a counter labelled by kind."""
+
+    def __init__(self, counter: "Counter") -> None:
+        super().__init__(counter, "kind")
+
+
+class _KindSeverityOnceCounter(_OnceCounter):
+    """``_OnceCounter`` for a counter labelled by kind *and* severity."""
+
+    def __init__(self, counter: "Counter") -> None:
+        super().__init__(counter, "kind", "severity")
+
 
 # -- Resilience layer ------------------------------------------------------- #
 CIRCUIT_STATE = REGISTRY.gauge(
@@ -563,6 +636,14 @@ DLQ_SIZE = REGISTRY.gauge(
     "The number of entries currently in the dead-letter queue.",
 )
 
+# -- the "count once" trackers ----------------------------------------------- #
+#: Counts each anomaly once, when it is first seen, rather than once per
+#: read. The detectors recompute on every request, so an unguarded counter
+#: would measure the console's polling rate instead of the anomaly rate.
+ANOMALY_COUNTER = _KindSeverityOnceCounter(ANOMALIES)
+SHORTAGE_ALERT_COUNTER = _SeverityOnceCounter(SHORTAGE_ALERTS)
+INCIDENT_COUNTER = _SeverityOnceCounter(INCIDENTS)
+
 #: The metric families the observability self-check requires to be present.
 #: Derived from the brief's §15 layer list -- a missing family means a layer
 #: of the requirement is not covered.
@@ -620,6 +701,7 @@ def _pre_register() -> None:
 
     for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
         SHORTAGE_ALERTS.register(severity=severity)
+        INCIDENTS.register(severity=severity)
 
     for kind in ("plan", "dispatch", "cancel"):
         DECISIONS.register(kind=kind)
@@ -630,7 +712,8 @@ def _pre_register() -> None:
         FALLBACK_ACTIVATIONS.register(kind=kind)
 
     for kind in ANOMALY_KINDS:
-        ANOMALIES.register(kind=kind, severity="MEDIUM")
+        for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            ANOMALIES.register(kind=kind, severity=severity)
 
     for result in ("ok", "error"):
         SNAPSHOT_REFRESH.register(result=result)

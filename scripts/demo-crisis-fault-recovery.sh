@@ -36,6 +36,30 @@ FAULT_SECONDS="${FAULT_SECONDS:-60}"
 NARRATE_ONLY=0
 [[ "${1:-}" == "--narrate" ]] && NARRATE_ONLY=1
 
+# --------------------------------------------------------------------------- #
+# The fault must not outlive the script.
+#
+# The injected outage lasts 60 seconds and the script may be interrupted at
+# any point -- Ctrl-C during the wait for the breaker to trip is the likely
+# case. Without a trap, the fault stays active and the backend stays
+# degraded for the rest of the judging session, which is exactly the wrong
+# state to be left in.
+#
+# The trap fires on normal exit too, so the explicit clear further down is
+# belt-and-braces rather than the only path.
+# --------------------------------------------------------------------------- #
+FAULT_INJECTED=0
+cleanup_fault() {
+  if [[ $FAULT_INJECTED -eq 1 ]]; then
+    curl -s -m 5 -X POST "$SIM/admin/faults/clear" >/dev/null 2>&1 || true
+    if [[ -t 1 ]]; then
+      echo ""
+      printf '%sThe injected fault has been cleared.%s\n' "$DIM" "$RESET"
+    fi
+  fi
+}
+trap cleanup_fault EXIT INT TERM
+
 if [[ -t 1 ]]; then
   BOLD=$'\033[1m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'
   CYAN=$'\033[36m'; DIM=$'\033[2m'; RESET=$'\033[0m'
@@ -141,6 +165,7 @@ if [[ $NARRATE_ONLY -eq 0 ]]; then
     -d "{\"type\":\"unavailable\",\"duration_seconds\":$FAULT_SECONDS}" \
     | head -c 300
   echo ""
+  FAULT_INJECTED=1
 fi
 
 # --------------------------------------------------------------------------- #

@@ -21,7 +21,7 @@ Today closed that gap. Four things were built:
    degraded answer — it is a wrong one.
 2. **A hand-rolled Prometheus exposition at a bare `/metrics`,** plus a JSON
    mirror at `/api/observability` that the console's new **System tab**
-   reads. Thirty metric families across four groups.
+   reads. Twenty-nine metric families across four groups.
 3. **A measured load test** across three named workloads, with the report
    tying request latency to **simulator pool saturation** — the signal that
    would have caught the connection-pool incident that took this platform
@@ -85,7 +85,7 @@ the cached world — a restart would make the outage worse, not better.
 
 ### 2.3 The metrics — `backend/app/metrics.py`
 
-A **hand-rolled** Prometheus text exposition, ~400 lines, **zero new
+A **hand-rolled** Prometheus text exposition, under 800 lines, **zero new
 dependencies**. `prometheus_client` was not added: the backend image stays
 slim and offline-buildable, and a hand-rolled writer is small enough to
 *read*, which is how the team knows the exposition is correct.
@@ -106,7 +106,7 @@ browser would put a number-parsing bug inside the console's central promise: a
 figure that failed to parse would render as *something*, and "something" is
 exactly what the one rule forbids.
 
-**Thirty metric families across four groups:**
+**Twenty-nine metric families across four groups:**
 
 | Layer | The signal that matters |
 | :--- | :--- |
@@ -385,7 +385,7 @@ of bug in a tool whose whole job is reporting.
 | Suite | It reported | It should report |
 | :--- | :--- | :--- |
 | verifier | `4/4` | `49 checks passed` |
-| backend | `457 passed,` | `464 passed, 8 skipped, …` |
+| backend | `457 passed,` | `468 passed, 8 skipped, …` |
 | frontend | *(empty)* | `Tests  136 passed \| 3 skipped (139)` |
 
 The verifier's `4/4` was the **last of six groups**, not the total. The
@@ -503,6 +503,163 @@ families; the fourth is met with structured logging.** The split is stated
 plainly in `docs/OBSERVABILITY.md` and `README.md` rather than glossed over.
 A judge checking §15 coverage finds the answer stated, not hidden.
 
+### Bug 18 — Four endpoints returned a 200 with an error body
+
+A missing entity should be a **404**. Four read endpoints returned the
+error envelope *inside* a 200:
+
+```
+GET /api/anomalies/does-not-exist  ->  200  {"status":"ERROR", "error":{"code":"NOT_FOUND", …}}
+GET /api/incidents/does-not-exist  ->  200
+GET /api/forecast/station-nope      ->  200
+GET /api/optimize/plan-nope         ->  200
+```
+
+A 200 with `"status": "ERROR"` in the body reads as **success** to
+`curl --fail`, to a monitoring probe, and to any client that checks the
+status before the body. The envelope also said `http_status: 404` — the
+*body* knew, while the *status line* did not.
+
+The fix raises `HTTPException(404)`, which the existing exception handler
+turns into the same canonical envelope — so the body is unchanged and the
+status is now true. `routers/state.py` already did it this way; the API was
+internally inconsistent, and the inconsistency was invisible without
+checking the status code.
+
+### Bug 19 — The validator's HTTP status was computed, then thrown away
+
+The validator distinguishes three kinds of rejection:
+
+| Rule | Code | HTTP |
+| :--- | :--- | :---: |
+| `quantity <= 0` | `INVALID_QUANTITY` | 422 |
+| Unknown depot / station / route | `NOT_FOUND` | 404 |
+| Route over capacity, depot closed, … | *(various)* | 409 |
+
+`_reject()` accepted an `http_status` argument and the callers passed the
+right values — but `PlanResult` had no field to hold it, so the value was
+**silently dropped**. The router then hardcoded `http_status=409` for every
+rejection.
+
+So a request for an unknown depot returned **409**, and a negative quantity
+returned **409** — a client could not tell "that depot does not exist" from
+"that route is over capacity" without parsing the message. `docs/BACKEND.md`
+§2.1 documented 404 and 422 all along.
+
+The fix adds `http_status` to `PlanResult` and lets the router report the
+validator's decision. Measured live:
+
+```
+unknown depot  ->  404   (was 409)
+negative qty   ->  422   (was 409)
+disrupted route->  409   (correct before, still correct)
+```
+
+### Bug 20 — A read endpoint was incrementing a counter
+
+`GET /api/anomalies/summary` incremented `backend_shortage_alerts_total`
+once **per anomaly, per request**. The detectors recompute against the live
+world on every poll, so the counter measured *how often the console
+refreshed* rather than how many alerts were raised.
+
+Measured: three polls moved `backend_shortage_alerts_total{severity="HIGH"}`
+from **7.0 to 10.0** — the number rose every time a judge looked at it. The
+Grafana panel "Shortage alerts (by severity)" therefore plotted the
+viewer's polling rate.
+
+A counter incremented by a read is a bug by definition. The fix counts each
+anomaly **once**, when it is first seen, through a tracker that remembers
+what it has already counted and resets when the world advances:
+
+```python
+ANOMALY_COUNTER.count(
+    ((a.id, {"kind": a.kind, "severity": a.severity}) for a in anomalies),
+    tick=str(tick),
+)
+```
+
+Three regression tests pin it: five polls of an unchanged world must move
+nothing; every anomaly series must carry **both** labels; and the incident
+counter must render at all.
+
+### Bug 21 — Three counters were declared but never incremented
+
+`backend_circuit_rejections_total`, `backend_upstream_retries_total` and
+`backend_incidents_total` had `# HELP` and `# TYPE` lines but **no sample
+lines** — so they rendered as *absent*, which is exactly what an
+uninstrumented metric looks like. The Grafana panel "Circuit transitions and
+rejections" queried the rejections counter and showed **"No data"**
+permanently.
+
+The rejections counter now increments from the breaker's single choke point:
+
+```python
+def _on_breaker_call(outcome: str, duration_seconds: float) -> None:
+    UPSTREAM_REQUESTS.inc(outcome=outcome)
+    UPSTREAM_DURATION.observe(duration_seconds)
+    if outcome == "circuit_open":
+        CIRCUIT_REJECTIONS.inc()
+```
+
+The incident counter is now pre-registered with its severity label set, so
+it renders as zeros rather than as absent.
+
+The **retries** counter was removed rather than wired up. The simulator
+client retries internally — three retries with backoff — and that happens
+*inside* the client, below the breaker's choke point. The backend genuinely
+cannot see a retry, so the counter would have been a permanent zero: a number
+that looks like data and means nothing. The honest proxy is the duration
+histogram and the `timeout` / `transport_error` outcomes.
+
+### Bug 22 — The console could show stale data after fresh data
+
+`useBackend.ts`'s `refresh()` returned a cleanup function that set a
+`cancelled` flag — but **both callers discarded the return value**, so the
+flag was never set and the guards were dead code.
+
+Two refreshes can be in flight at once: the 5-second poll and an SSE nudge.
+Without sequencing, the *older* one could resolve after the newer one and
+overwrite fresher state with stale state — the console going backwards. The
+fix is request sequencing: each refresh takes a ticket, and only the holder
+of the newest ticket may write.
+
+### Bug 23 — The demo could leave the backend degraded
+
+`demo-crisis-fault-recovery.sh` injected a 60-second `unavailable` fault and
+cleared it at the end — with **no `trap`**. Ctrl-C during the wait for the
+breaker to trip (the likely case) left the fault active and the backend
+degraded for the rest of the judging session.
+
+The script now installs an `EXIT INT TERM` trap that clears the fault
+whatever happens.
+
+### Bug 24 — The prose audit read digits out of identifiers
+
+`explain.py`'s number regex had no word-boundary guard, so `Route R12` yielded
+the number **12**. The safety audit — "does the prose mention any number
+that is not in the declared set?" — therefore rejected legitimate prose
+mentioning a route or station id.
+
+```
+old:  "Route R12 capacity 3"  ->  ['12', '3']      # 12 is not a quantity
+new:  "Route R12 capacity 3"  ->  ['3']
+```
+
+The fix adds lookarounds, and keeps every real number: `"1250 L (about
+12.5%)"` still yields both.
+
+### Bug 25 — Three smaller defects
+
+- **The Grafana "System" row was titled "CPU, memory, resource utilisation"**
+  but its only panels measure simulator load. A row title promising numbers
+  that do not exist is the same failure mode as an invented figure on the
+  console. Retitled to "simulator load and resource utilisation".
+- **`dlq.close()` was never called** on shutdown, unlike `journal.close()`.
+  The SQLite handle leaked.
+- **The frontend's `explainPlan` read `payload.explanation`**, a field the
+  backend never stores — so it always returned `null`. It was dead code, so
+  it was removed rather than left as a function that silently returns null.
+
 ---
 
 ## 4. Measured results
@@ -570,7 +727,7 @@ change.
 | Gate | Before | After |
 | :--- | --- | --- |
 | Verifier checks | 49/49 | **49/49** |
-| Backend tests | 338 passed, 8 skipped | **464 passed, 8 skipped** |
+| Backend tests | 338 passed, 8 skipped | **468 passed, 8 skipped** |
 | Frontend tests | 132 passed, 3 skipped | **136 passed, 3 skipped** |
 | Healthy services | 5 | **5** |
 | Prometheus targets | — | `backend: up ok` |
@@ -650,7 +807,7 @@ The harness's verdict on a green stack:
   "duration_seconds": 220,
   "suites": {
     "verifier":      {"status": "passed", "summary": "49 checks passed"},
-    "backend_tests": {"status": "passed", "summary": "464 passed, 8 skipped, …"},
+    "backend_tests": {"status": "passed", "summary": "468 passed, 8 skipped, …"},
     "frontend_tests":{"status": "passed", "summary": "Tests  136 passed | 3 skipped (139)"},
     "observability": {"status": "passed", "summary": "checked 46 assertions"},
     "load_test":     {"status": "passed", "report": "loadtest/results/….json"}
@@ -680,8 +837,8 @@ demo.
 | Anomaly-to-explanation layer | ✅ Complete — deterministic and auditable; LLM isolated and off |
 | **Operator dashboard frontend** | ✅ **Complete — 5th service, live-verified, no-invented-numbers enforced** |
 | **Console redesign** | ✅ **Complete — one column, one hero, one panel at a time; light + dark theme** |
-| **End-to-end verification + documentation** | ✅ **Complete — 49/49, 464 backend, 136 frontend** |
-| **Observability (Prometheus / Grafana) & load testing** | ✅ **Complete — 30 metric families, 9 alert rules, 19-panel dashboard, 3 measured workloads** |
+| **End-to-end verification + documentation** | ✅ **Complete — 49/49, 468 backend, 136 frontend** |
+| **Observability (Prometheus / Grafana) & load testing** | ✅ **Complete — 29 metric families, 9 alert rules, 19-panel dashboard, 3 measured workloads** |
 | **Circuit breaker + degraded mode** | ✅ **Complete — 13.75 s → 1 ms; reads degrade, writes refuse** |
 | **Health status table (PDF §16)** | ✅ **Complete — on `/api/health` and in the console's System tab** |
 | **DLQ + graceful recovery** | ✅ **Complete — a bad frame is quarantined, not raised** |
@@ -732,7 +889,7 @@ demo.
 ## 9. Immediate Next Steps
 
 1. Rebuild and recreate both changed images (`backend`, `frontend`) and
-   re-run the full gate — 49/49, 464 backend, 136 frontend, 5 healthy.
+   re-run the full gate — 49/49, 468 backend, 136 frontend, 5 healthy.
 2. Run `./scripts/verify-all.sh --json` and commit the report as the
    submission's machine-readable evidence.
 3. A fresh-eyes read of `docs/` against the running product, then the
@@ -742,11 +899,20 @@ demo.
 > the forecast oracle and the console's no-invented-numbers test are reusable
 > as a **regression suite** for every subsequent change — run all of them
 > after each commit to guarantee no integration contract has been broken.
-> Today they caught **eleven** real bugs (Bug 7 through Bug 17 in §3), plus
+> Today they caught **nineteen** real bugs (Bug 7 through Bug 25 in §3), plus
 > the `SYSTEM_DESIGN.md` drift that a fresh reader found.
 >
-> Three of the eleven (Bugs 12, 13 and 14) were found by *the harness itself*,
+> Three of the nineteen (Bugs 12, 13 and 14) were found by *the harness itself*,
 > which is the strongest argument for building one: the stranded coroutine
 > surfaced as a `RuntimeWarning`, the broken frontend invocation surfaced as a
 > `FAIL` verdict, and the wrong summaries surfaced as numbers that did not
 > add up. A green stack is not the same thing as an honest harness.
+>
+> The rest were found by **three independent fresh-eyes audits** of the code
+> and the documents against the running product. Every one of them was a
+> *silent* defect — a green stack, a passing suite, a document that looked
+> right. A 200 carrying an error body. A counter that measured the reader.
+> A status the code computed and then threw away. None of them could be
+> found by running the tests, because the tests encoded the same wrong
+> behaviour. **That is the argument for reading the code against the
+> product, not just for writing more tests.**

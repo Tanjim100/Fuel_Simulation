@@ -33,6 +33,7 @@ from .dlq import DeadLetterQueue
 from .errors import register_error_handlers
 from .journal import DispatchJournal
 from .metrics import (
+    CIRCUIT_REJECTIONS,
     CIRCUIT_STATE,
     CIRCUIT_TRANSITIONS,
     FALLBACK_ACTIVATIONS,
@@ -195,6 +196,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await broker.stop()
         if journal is not None:
             journal.close()
+        if dlq is not None:
+            # The DLQ's SQLite handle is opened lazily and would otherwise
+            # leak on shutdown -- the same treatment the journal gets.
+            dlq.close()
         await client.aclose()
 
 
@@ -216,6 +221,11 @@ def _on_breaker_call(outcome: str, duration_seconds: float) -> None:
     """
     UPSTREAM_REQUESTS.inc(outcome=outcome)
     UPSTREAM_DURATION.observe(duration_seconds)
+    if outcome == "circuit_open":
+        # The breaker rejected the call without touching the wire. This is
+        # a distinct, important number: it is how much traffic the outage
+        # absorbed, and it is the counter the Grafana panel queries.
+        CIRCUIT_REJECTIONS.inc()
 
 
 def _allocation_request(payload: dict[str, Any]):

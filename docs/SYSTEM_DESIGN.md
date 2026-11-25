@@ -328,7 +328,7 @@ Full detail in `docs/RESILIENCE.md`. In summary:
 
 Full detail in `docs/OBSERVABILITY.md`. In summary:
 
-- **`/metrics`** — a hand-rolled Prometheus exposition, ~400 lines, zero new
+- **`/metrics`** — a hand-rolled Prometheus exposition, under 800 lines, zero new
   dependencies.
 - **`/api/observability`** — the JSON mirror, which the console's System tab
   reads. The console never parses a text format: doing so would put a

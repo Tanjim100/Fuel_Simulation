@@ -12,7 +12,6 @@ import type {
   BrokerHealth,
   Depot,
   ExecuteResponse,
-  Explanation,
   Forecast,
   ForecastSummary,
   Health,
@@ -134,14 +133,4 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-
-  explainPlan: async (planId: string): Promise<Explanation | null> => {
-    const body = await request<{ plan?: { payload?: { optimization?: unknown } } }>(
-      `/api/optimize/${encodeURIComponent(planId)}`,
-    )
-    // The recorded plan keeps the explanation inside its payload; the endpoint
-    // returns the plan, not the explanation, so we read it from there.
-    const payload = body.plan?.payload as { explanation?: Explanation } | undefined
-    return payload?.explanation ?? null
-  },
 }

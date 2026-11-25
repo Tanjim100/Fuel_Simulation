@@ -218,9 +218,11 @@ def test_station_forecast_returns_that_station(client):
 
 
 def test_station_forecast_reports_an_unknown_station(client):
-    body = client.get("/api/forecast/station-nope").json()
+    response = client.get("/api/forecast/station-nope")
+    assert response.status_code == 404
+    body = response.json()
     assert body["status"] == "ERROR"
-    assert body["error"]["code"] == "NOT_FOUND"
+    assert body["error"]["http_status"] == 404
 
 
 # --------------------------------------------------------------------------- #
