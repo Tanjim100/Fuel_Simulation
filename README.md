@@ -70,7 +70,7 @@ Expected output ends with:
 
 ### Or run everything at once
 
-`./scripts/verify-all.sh` runs all four suites in order and emits **one JSON
+`./scripts/verify-all.sh` runs all five suites in order and emits **one JSON
 object** — the harness-compatible entry point. Exit code `0` only if everything
 passed.
 
@@ -250,7 +250,7 @@ cannot do safely.
 ### The metrics
 
 `GET /metrics` — a hand-rolled Prometheus exposition, ~400 lines, **zero new
-dependencies**. It covers the four layers PDF §15 names:
+dependencies**:
 
 | Layer | The signal that matters |
 | :--- | :--- |
@@ -258,6 +258,17 @@ dependencies**. It covers the four layers PDF §15 names:
 | **System** | in-flight simulator reads, the read limit, **pool saturation**, queue depth |
 | **Intelligence** | forecast error, forecast verdicts, shortage alerts, decision frequency, **fallback activations** |
 | **Resilience** | circuit state, circuit transitions and rejections, broker mode, suspected SSE drops, snapshot age, DLQ size |
+
+PDF §15 names four layers — application, system, intelligence and **logs**.
+The first three are the first three rows above. The fourth row is a fifth
+group, **resilience**, which the brief does not list but which is where this
+platform's most important operational signal lives.
+
+**§15's fourth layer — logs — is covered by the backend's structured
+logging, not by a metric family**: a log line is not a metric, and a counter
+of log lines would be a number without meaning. The backend emits **57 log
+statements** across nine modules — every upstream failure with its exception
+class, every circuit transition, every dispatch and journal write.
 
 The labels use the **route template**, never the raw path — otherwise
 `/api/stations/station-mirpur` and `/api/stations/station-tongi` become two
@@ -810,7 +821,7 @@ failing, and tripping on them would take the backend down for one bad request.
 │   ├── Day_5.md                   # operator console + the connection-pool incident
 │   └── Day_6.md                   # observability + resilience + load testing
 ├── scripts/
-│   ├── verify-all.sh              # THE one command — four suites, one JSON verdict
+│   ├── verify-all.sh              # THE one command — five suites, one JSON verdict
 │   ├── check_observability.py     # asserts every required metric family is present
 │   ├── demo-normal.sh             # demo beats 1–8
 │   └── demo-crisis-fault-recovery.sh  # demo beats 9–14

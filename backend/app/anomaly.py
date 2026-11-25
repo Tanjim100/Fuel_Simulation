@@ -81,6 +81,25 @@ ROUTE_BOTTLENECK = "ROUTE_BOTTLENECK"
 SUPPLY_SHORTFALL = "SUPPLY_SHORTFALL"
 STOCKOUT_RISK = "STOCKOUT_RISK"
 
+#: Every anomaly kind, derived from the constants above.
+#:
+#: This exists so that a list of kinds is never written out twice. The metrics
+#: module pre-registers one zero-valued series per kind -- an absent metric is
+#: indistinguishable from an uninstrumented one -- and a hand-copied list there
+#: would be free to drift from the constants here. That is exactly how
+#: ``STATION_OUTAGE`` ended up registered but never emitted, while
+#: ``DEPOT_BOTTLENECK`` and ``STOCKOUT_RISK`` were emitted but never
+#: registered. Deriving the list removes the second copy.
+ANOMALY_KINDS: tuple[str, ...] = (
+    DEMAND_SPIKE,
+    DEMAND_NORMALISED,
+    INVENTORY_DROP,
+    DEPOT_BOTTLENECK,
+    ROUTE_BOTTLENECK,
+    SUPPLY_SHORTFALL,
+    STOCKOUT_RISK,
+)
+
 #: Severity levels, most severe first.
 SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 

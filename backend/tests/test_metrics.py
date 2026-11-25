@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from app.anomaly import ANOMALY_KINDS
 from app.metrics import (
     CONTENT_TYPE,
     DEFAULT_BUCKETS,
@@ -405,6 +406,43 @@ def test_the_four_layers_are_all_declared() -> None:
     assert set(METRIC_FAMILIES) == {
         "application", "system", "intelligence", "resilience",
     }
+
+
+def test_every_anomaly_kind_is_pre_registered(client) -> None:
+    """An anomaly kind must appear in the exposition before it is ever raised.
+
+    The anomaly metric is pre-registered so that a dashboard can show "0"
+    rather than a gap. That only works if the pre-registered list is the
+    *real* list of kinds.
+
+    It was not, once. ``STATION_OUTAGE`` was registered but never emitted,
+    and ``DEPOT_BOTTLENECK`` and ``STOCKOUT_RISK`` were emitted but never
+    registered -- so the first read as a permanent zero and the other two
+    appeared only once they fired, with no zero to compare against.
+
+    The list is now derived from the anomaly module's own constants, so this
+    test pins the derivation rather than a second copy of the list.
+    """
+    body = client.get("/metrics").text
+    for kind in ANOMALY_KINDS:
+        assert f'backend_anomalies_total{{kind="{kind}"' in body, (
+            f"the anomaly kind {kind} is not pre-registered in the exposition"
+        )
+
+
+def test_no_anomaly_kind_is_registered_that_does_not_exist(client) -> None:
+    """The converse: a registered kind that is never emitted is a lie.
+
+    ``backend_anomalies_total{kind="STATION_OUTAGE"}`` would have read 0
+    forever, which is indistinguishable from a detector that never fires.
+    """
+    body = client.get("/metrics").text
+    registered = set(re.findall(r'backend_anomalies_total\{kind="([^"]+)"', body))
+    assert registered == set(ANOMALY_KINDS), (
+        "the exposition registers anomaly kinds that do not exist, or omits "
+        f"ones that do: registered={sorted(registered)}, "
+        f"real={sorted(ANOMALY_KINDS)}"
+    )
 
 
 def test_the_exposition_has_a_type_line_for_every_family(client) -> None:

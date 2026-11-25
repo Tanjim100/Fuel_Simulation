@@ -192,7 +192,7 @@ Recorded live via `scripts/demo-crisis-fault-recovery.sh`:
 | Step | Command | Observed |
 | :--- | :--- | :--- |
 | Inject the fault | `POST /admin/faults {"type":"unavailable","duration_seconds":60}` | HTTP 201 |
-| The breaker trips | — | `state: OPEN`, `consecutive_failures: 8` |
+| The breaker trips | — | `state: OPEN`, `consecutive_failures: 5` (the threshold) |
 | A read degrades | `GET /api/state` | **HTTP 200**, `degraded: true`, tick 1, 4 stations |
 | A write refuses | `POST /api/plan` | **HTTP 503**, `{"code":"CIRCUIT_OPEN"}` |
 | The gate stays honest | — | the plan is rejected with `reject_code: ROUTE_DISRUPTED` — "route route-gazipur-mirpur is DISRUPTED and cannot carry a shipment" |

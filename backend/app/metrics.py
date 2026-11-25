@@ -48,6 +48,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from .anomaly import ANOMALY_KINDS
+
 __all__ = [
     "Counter",
     "Gauge",
@@ -627,10 +629,7 @@ def _pre_register() -> None:
     ):
         FALLBACK_ACTIVATIONS.register(kind=kind)
 
-    for kind in (
-        "DEMAND_SPIKE", "DEMAND_NORMALISED", "ROUTE_BOTTLENECK",
-        "SUPPLY_SHORTFALL", "INVENTORY_DROP", "STATION_OUTAGE",
-    ):
+    for kind in ANOMALY_KINDS:
         ANOMALIES.register(kind=kind, severity="MEDIUM")
 
     for result in ("ok", "error"):

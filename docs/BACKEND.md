@@ -1031,7 +1031,7 @@ All use the existing `_env_*` helpers and the `Settings.from_env()` pattern.
 | :--- | :--- |
 | `tests/test_forecast.py` | Pure unit tests + the golden fixture oracle |
 | `tests/test_optimizer.py` | Constraint, determinism and rerouting properties |
-| `tests/test_optimizer_vs_greedy.py` | "Never worse than the naive baseline" matrix |
+| `tests/test_optimizer.py` | The "never worse than the naive baseline" matrix (see also `tests/test_lp_solver.py`) |
 | `tests/test_optimizer_against_simulator.py` | **The oracle** — soundness against the live simulator, randomised differential test |
 | `tests/test_optimizer_api.py` | The HTTP surface |
 | `tests/test_anomaly.py` | Detector properties, determinism, silent-spill attribution |

@@ -5,6 +5,11 @@ names four layers: **application**, **system**, **intelligence** and **logs**.
 It also names "fallback activation" explicitly. PDF §16 then asks for a
 specific health-status table. This document is the catalogue.
 
+**Coverage in one line:** the first three layers are met with metric
+families; the fourth — logs — is met with the backend's structured logging,
+because a log line is not a metric. The split is stated plainly in the
+dashboard section below rather than glossed over.
+
 ---
 
 ## The two endpoints
@@ -319,7 +324,38 @@ docker compose -f docker-compose.yml -f observability/compose.monitoring.yml up 
 | Grafana | <http://localhost:3000> — anonymous admin, no login |
 
 The Grafana dashboard is **"Fuel Supply Intelligence — Platform Observability"**,
-in the `BUET CSE Fest` folder: four rows, one per §15 layer, nineteen panels.
+in the `BUET CSE Fest` folder: four rows, nineteen panels.
+
+| Row | §15 layer | Panels |
+| :--- | :--- | ---: |
+| Application | request rate, latency, error rate, availability | 5 |
+| System | CPU, memory, resource utilisation | 2 |
+| Intelligence | prediction error, model confidence, shortage alerts, decision frequency, fallback activation | 5 |
+| Resilience | circuit breaker, stream, snapshot, dead-letter queue | 7 |
+
+**The fourth row is *not* §15's fourth layer.** §15 names four layers —
+application, system, intelligence and **logs** — and the first three are the
+first three rows. The fourth row is a fifth group, **resilience**, which the
+brief does not list but which is where this platform's most important
+operational signal lives (the circuit breaker, the stream's health, the
+dead-letter queue). It was added because the brief also says *"clear and
+demonstrable behavior is more important"*, and a resilience story that is only
+visible in log lines is not demonstrable.
+
+**§15's fourth layer — logs — is covered, but not by a metric family.** Logs
+are not metrics: a counter of "how many log lines" would be a number without
+meaning. The layer is covered by the backend's own structured logging —
+**57 log statements** across nine modules, at three levels:
+
+| What §15 asks to be logged | Where |
+| :--- | :--- |
+| Integration failures | `simulator_client.py` (13 warnings) — every upstream failure is logged with the exception's class |
+| Decision events | `broker.py` (4 info), `dispatch.py`, `journal.py`, `main.py` |
+| Recoveries | `circuit_breaker.py` — every state transition, including the automatic close |
+
+So the honest coverage statement is: **three layers are met with metrics, the
+fourth with logs.** See `docs/BACKEND.md` §4 for the event vocabulary and
+`backend/app/metrics.py`'s module docstring for the same split.
 
 `observability/prometheus-alerts.yml` carries nine rules:
 
