@@ -14,13 +14,16 @@ It consists of:
 | `redis` | `redis:alpine` | Cache layer for read snapshots + state tracking. |
 | `client-verifier` | `./verifier` (Python 3.11) | Defensive client + end-to-end verification suite. |
 | `backend` | `./backend` (Python 3.11) | Operator backend: SSE broker + pre-flight validator + optimiser + forecast + anomaly detection + explanation layer. |
-| `frontend` | `./frontend` (Node 22) | Operator console: three-column dashboard over the backend's API. |
+| `frontend` | `./frontend` (Node 22) | Operator console: a focused, tabbed dashboard over the backend's API. |
 
 Plus a defensive async client (`simulator_client.py`), a 49-check
 verification suite (`verify_simulator.py`), the backend service
 (pre-flight validator, optimiser, forecast, anomaly detection, SSE broker,
 dispatch API — see [`docs/BACKEND.md`](docs/BACKEND.md)), and the operator
 console (see [`docs/DASHBOARD.md`](docs/DASHBOARD.md)).
+
+To test the system under stress, inject domain events and API faults into the
+simulator — see [`docs/TESTING.md`](docs/TESTING.md).
 
 ---
 
@@ -163,6 +166,12 @@ The console is a fifth service on `:8003`. It renders the world the backend
 publishes and lets an operator act on the backend's recommendation — with a
 confirmation step, because a dispatch writes to the simulator.
 
+The screen is **one column, one hero, one panel at a time**: a slim status bar,
+a single action card carrying the plan and the dispatch button, and three tabs
+(Network, Forecast, Problems) with everything else one click away behind a
+disclosure. It has a **dark and a light theme**, toggled from the status bar and
+remembered across reloads.
+
 ```bash
 # The console (serves the built assets and proxies /api to the backend)
 open http://localhost:8003
@@ -191,7 +200,7 @@ Three other properties are worth stating:
    backend's internal hostname never reaches the browser.
 2. **SSE is advisory.** An event triggers a REST re-read; the payload is never
    rendered as world state. A dropped stream degrades to polling and the
-   telemetry bar *says* so.
+   status bar *says* so.
 3. **Dispatch takes two clicks.** The first arms the action and dispatches
    nothing; the second confirms it.
 
@@ -306,6 +315,42 @@ curl -s -X POST http://localhost:8000/admin/faults/clear
 curl -s "http://localhost:8000/admin/audit?limit=20"
 ```
 
+The simulator also has a **built-in web console** at
+`http://localhost:8000/admin` — dropdowns for both injection surfaces, a live
+audit pane, and one-click fault clearing.
+
+### 2.5 Testing by injection
+
+The commands above are the whole injection surface, but the *timing* is not
+obvious and getting it wrong produces confusing results. `docs/TESTING.md`
+documents the measured behaviour — including the `start_tick` off-by-one, which
+six domain events and five API faults do and do not raise an anomaly for, and
+why `stream_disconnect` does **not** tear down a live stream.
+
+The short version:
+
+```bash
+# Break a route that has no alternative, and watch the system notice
+curl -s -X POST http://localhost:8000/admin/events \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"route_disruption","start_tick":0,"duration_ticks":10,
+       "parameters":{"route_ids":["route-patiya-coxsbazar"]}}'
+
+curl -s -X POST http://localhost:8000/admin/run
+sleep 12
+
+curl -s http://localhost:8002/api/anomalies    # → ROUTE_BOTTLENECK, CRITICAL
+curl -s http://localhost:8002/api/metrics      # → kpis.disrupted_routes: 1
+```
+
+Two rules that will save you a debugging session:
+
+- **An event with `start_tick: N` activates on the tick *after* N** if you
+  inject it while the world already sits at tick N. Inject `N-1` for it to be
+  live at tick N.
+- **Reset the world before you test.** The baseline is well-stocked for its
+  first ~60 ticks, so an empty plan early on is *correct*, not a bug.
+
 ---
 
 ## 3. What the suite verifies
@@ -415,9 +460,37 @@ directly rather than assumed:
 
 A third difference worth noting: the guide's fast-start snippet shows
 `SIMULATION_SPEED: 15` / `TICK_MINUTES: 8`, which are swapped relative to the
-documented defaults. `docker-compose.yml` uses the real defaults —
-`SIMULATION_SPEED=8` (wall-clock ticks/second while running) and
-`TICK_MINUTES=15` (simulated minutes per tick).
+documented defaults. `docker-compose.yml` uses the real semantics —
+`SIMULATION_SPEED` (wall-clock ticks/second while running) and
+`TICK_MINUTES=15` (simulated minutes per tick), matching the domain model's
+"15-minute tick clock".
+
+### 4.2a The tick clock: one tick every 10 real seconds
+
+`SIMULATION_SPEED=0.1` gives **one tick every 10 real seconds**, and each tick
+advances the simulated clock by 15 minutes. So the console shows a quarter-hour
+of supply-chain activity roughly every ten seconds.
+
+**10 seconds is the slowest this simulator can go.** Its runner sleeps
+
+```python
+await asyncio.sleep(max(0.05, 1.0 / max(0.1, settings.simulation_speed)))
+```
+
+The inner `max(0.1, ...)` floors the divisor at `0.1`, which floors the interval
+at **10 seconds** no matter how small the speed is set. A 15-second tick is
+therefore not expressible in this simulator version — 10s is the closest
+reachable value. (At the previous `SIMULATION_SPEED=8` the world advanced a
+full simulated day every 12 real seconds, which is far too fast to read.)
+
+Two backend timings were retuned to match, because both were calibrated
+against a fast-ticking world:
+
+| Setting | Was | Now | Why |
+| :--- | :--- | :--- | :--- |
+| `SSE_STALE_AFTER` | `20` | `45` | Events arrive once per tick, so a 20s threshold left only 10s of slack over a 10s tick — it would fire on a healthy but slow world. 45s is ~4 ticks of slack. |
+| `POLL_INTERVAL` | `2` | `5` | Polling twice a second read the same snapshot over and over. Half the tick interval is enough to keep a fresh snapshot without polling faster than the world changes. |
+| `POLL_MS` (console) | `4000` | `5000` | Same reasoning on the console side. The SSE stream nudges it the instant a tick lands; the poll is the safety net for a dropped stream. |
 
 ### 4.3 The backend owns one SSE subscription, and detects drops by tick progress
 
@@ -499,15 +572,20 @@ below as defaults:
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
-| `SIMULATION_SPEED` | `8` | Wall-clock ticks per second while running. |
+| `SIMULATION_SPEED` | `0.1` | Wall-clock ticks per second while running. `0.1` = one tick every 10 seconds — the slowest this simulator version allows. |
 | `TICK_MINUTES` | `15` | Simulated minutes advanced per tick. |
 | `SIMULATOR_START_MODE` | `paused` | `paused` or `running`. |
 
 Override them inline:
 
 ```bash
-SIMULATION_SPEED=15 TICK_MINUTES=30 SIMULATOR_START_MODE=running docker compose up -d
+SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose up -d
 ```
+
+> `SIMULATOR_START_MODE=paused` is the default so the test suites can drive
+> ticks deterministically via `POST /admin/step`. To watch the console against
+> a live world, start the stack as above and then run
+> `curl -X POST http://localhost:8000/admin/run`.
 
 ---
 
@@ -591,27 +669,32 @@ SIMULATION_SPEED=15 TICK_MINUTES=30 SIMULATOR_START_MODE=running docker compose 
     ├── vite.config.ts             # dev proxy + test config
     ├── package.json
     ├── src/
-    │   ├── App.tsx                # the three-column layout
+    │   ├── App.tsx                # the focus + drill-down layout
     │   ├── api/
     │   │   ├── types.ts           # hand-written types mirroring the backend
     │   │   └── client.ts          # the only place that talks to the backend
     │   ├── lib/
     │   │   ├── format.ts          # rendering only — never derives
     │   │   ├── derive.ts          # the pure derivations — the only place a number is born
+    │   │   ├── useTheme.ts        # the dark/light preference, persisted
     │   │   └── useBackend.ts      # the world hook: SSE (advisory) + polling fallback
     │   ├── components/
-    │   │   ├── common.tsx         # Panel, Badge, Stat, Meter, Empty, ErrorBox
-    │   │   ├── TelemetryBar.tsx   # TelemetryBar, StaleBanner
+    │   │   ├── common.tsx         # Panel, Badge, Dot, Stat, Meter, Empty, ErrorBox
+    │   │   ├── StatusBar.tsx      # the slim top bar + the theme toggle
+    │   │   ├── ActionCard.tsx     # the hero: the plan, the why, the two-step dispatch
+    │   │   ├── DetailTabs.tsx     # the tab strip — one panel at a time
+    │   │   ├── Disclosure.tsx     # the reusable expander
+    │   │   ├── TelemetryBar.tsx   # StaleBanner (the freshness contract)
     │   │   ├── NetworkPanel.tsx   # DepotPanel, StationPanel, RoutePanel
-    │   │   ├── DecisionPanel.tsx  # the plan and the two-step dispatch control
-    │   │   ├── ForecastPanel.tsx  # ForecastPanel, DemandPanel
-    │   │   └── AnomalyPanel.tsx   # AnomalyPanel, IncidentPanel, JournalPanel
+    │   │   ├── ForecastPanel.tsx  # the merged forecast tab
+    │   │   └── AnomalyPanel.tsx   # AnomalyPanel, IncidentPanel
     │   └── test/
     │       ├── derive.test.ts             # the pure derivations
     │       ├── format.test.ts             # the formatting
     │       ├── panels.test.tsx            # every panel, against real payloads
     │       ├── stream.test.ts             # SSE is advisory; drop degrades; reconnect works
     │       ├── no-invented-numbers.test.tsx  # THE invariant
+    │       ├── theme.test.ts              # the toggle, the persistence, the fallbacks
     │       ├── live.test.tsx              # the same, against the running stack
     │       └── fixtures.ts                # real backend payloads, copied verbatim
 ```

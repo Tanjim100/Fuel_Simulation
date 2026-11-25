@@ -1,21 +1,28 @@
 /**
- * The panels.
+ * The console's components.
  *
  * These tests assert the console's core promise: **what is on screen is what
  * the backend said.** A panel that computes its own figure, or rounds a value
  * into something the backend never claimed, is a bug — and these tests are
  * what catches it.
+ *
+ * The console was redesigned to be readable — one column, one hero, one
+ * panel at a time. The *claims* below are unchanged from before the
+ * redesign; only the selectors and the components moved. A redesign that
+ * quietly dropped a guarantee would show up here as a missing assertion.
  */
 
 import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { BrokerHealth } from '../api/types'
+import { ActionCard } from '../components/ActionCard'
 import { AnomalyPanel, IncidentPanel } from '../components/AnomalyPanel'
-import { DecisionPanel } from '../components/DecisionPanel'
-import { DemandPanel, ForecastPanel } from '../components/ForecastPanel'
+import { DetailTabs } from '../components/DetailTabs'
+import { ForecastPanel } from '../components/ForecastPanel'
 import { DepotPanel, RoutePanel, StationPanel } from '../components/NetworkPanel'
-import { StaleBanner, TelemetryBar } from '../components/TelemetryBar'
+import { StaleBanner } from '../components/TelemetryBar'
+import { StatusBar } from '../components/StatusBar'
 import {
   anomalies,
   broker,
@@ -28,45 +35,48 @@ import {
   stations,
 } from './fixtures'
 
-describe('TelemetryBar', () => {
-  it('shows the service level the backend reported', () => {
+describe('StatusBar', () => {
+  const renderBar = (overrides: Partial<Parameters<typeof StatusBar>[0]> = {}) =>
     render(
-      <TelemetryBar
+      <StatusBar
         health={null}
         broker={broker}
         metrics={metrics}
         stations={stations}
         routes={routes}
+        theme="dark"
+        onToggleTheme={() => {}}
+        {...overrides}
       />,
     )
+
+  it('shows the service level the backend reported', () => {
+    renderBar()
     expect(screen.getByText('100.0%')).toBeInTheDocument()
   })
 
   it('counts the disrupted routes', () => {
-    render(
-      <TelemetryBar
-        health={null}
-        broker={broker}
-        metrics={metrics}
-        stations={stations}
-        routes={routes}
-      />,
-    )
+    renderBar()
     // One route in the fixture is DISRUPTED.
-    expect(screen.getByText('1', { selector: '.stat__value' })).toBeInTheDocument()
+    const disrupted = screen.getByText('Disrupted routes').parentElement
+    expect(disrupted).toHaveTextContent('1')
   })
 
   it('shows an em dash rather than a zero when there is no metrics reading', () => {
-    render(
-      <TelemetryBar
-        health={null}
-        broker={null}
-        metrics={null}
-        stations={[]}
-        routes={[]}
-      />,
-    )
+    renderBar({ broker: null, metrics: null, stations: [], routes: [] })
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+  })
+
+  it('says so when the network is broken', () => {
+    renderBar()
+    expect(screen.getByText('attention')).toBeInTheDocument()
+  })
+
+  it('offers a theme toggle', () => {
+    const onToggleTheme = vi.fn()
+    renderBar({ onToggleTheme })
+    screen.getByRole('button', { name: /switch to light theme/i }).click()
+    expect(onToggleTheme).toHaveBeenCalled()
   })
 })
 
@@ -109,7 +119,9 @@ describe('DepotPanel', () => {
 
   it('shows the per-tick cap so the headroom has context', () => {
     render(<DepotPanel depots={depots} />)
-    expect(screen.getByText('cap 12,000 L/tick')).toBeInTheDocument()
+    // The cap is context for the headroom figure beside it: "12,000 L of
+    // 12,000 L" — how much of this tick's allowance is left.
+    expect(screen.getByText(/of 12,000 L/)).toBeInTheDocument()
   })
 })
 
@@ -135,6 +147,15 @@ describe('StationPanel', () => {
     render(<StationPanel stations={stations} onSelect={onSelect} />)
     await userEvent.click(screen.getByText('Mirpur Fuel Station'))
     expect(onSelect).toHaveBeenCalledWith('station-mirpur')
+  })
+
+  it('keeps the per-fuel detail behind a disclosure', async () => {
+    render(<StationPanel stations={stations} />)
+    // The fuel breakdown is not on screen until it is asked for.
+    expect(screen.queryByText('DIESEL')).not.toBeInTheDocument()
+    const toggles = screen.getAllByText('Fuel levels')
+    await userEvent.click(toggles[0]!)
+    expect(screen.getAllByText('DIESEL').length).toBeGreaterThan(0)
   })
 })
 
@@ -175,12 +196,16 @@ describe('ForecastPanel', () => {
     render(<ForecastPanel summary={forecast} risks={[]} />)
     expect(screen.getByText('2 ticks')).toBeInTheDocument()
   })
-})
 
-describe('DemandPanel', () => {
   it('breaks the demand down by fuel', () => {
-    render(<DemandPanel summary={forecast} coverageTicks={16} />)
-    expect(screen.getByText('DIESEL')).toBeInTheDocument()
+    render(<ForecastPanel summary={forecast} risks={[]} />)
+    // DIESEL appears both in the fuel breakdown and in the stockout table.
+    // The breakdown is the one that carries a litres figure.
+    const breakdowns = screen.getAllByText('DIESEL')
+    const withLitres = breakdowns.filter((element) =>
+      (element.parentElement?.textContent ?? '').includes('L'),
+    )
+    expect(withLitres.length).toBeGreaterThan(0)
   })
 })
 
@@ -195,8 +220,10 @@ describe('AnomalyPanel', () => {
     expect(screen.getByText(/Reroute through the alternative depot/)).toBeInTheDocument()
   })
 
-  it('shows the backend metrics behind the anomaly', () => {
+  it('keeps the backend metrics behind a disclosure', async () => {
     render(<AnomalyPanel anomalies={anomalies} />)
+    expect(screen.queryByText('transit_ticks')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByText('Evidence'))
     expect(screen.getByText('transit_ticks')).toBeInTheDocument()
   })
 
@@ -213,104 +240,99 @@ describe('IncidentPanel', () => {
   })
 })
 
-describe('DecisionPanel', () => {
+describe('DetailTabs', () => {
+  it('shows one panel at a time', async () => {
+    render(
+      <DetailTabs
+        tabs={[
+          { id: 'a', label: 'First', content: <p>Panel A</p> },
+          { id: 'b', label: 'Second', content: <p>Panel B</p> },
+        ]}
+      />,
+    )
+    expect(screen.getByText('Panel A')).toBeInTheDocument()
+    expect(screen.queryByText('Panel B')).not.toBeInTheDocument()
+
+    // The tab click has to be awaited — the switch is a state update.
+    await userEvent.click(screen.getByRole('tab', { name: /Second/ }))
+    expect(screen.getByText('Panel B')).toBeInTheDocument()
+    expect(screen.queryByText('Panel A')).not.toBeInTheDocument()
+  })
+
+  it('counts the problems on the tab so they are never hidden', () => {
+    render(
+      <DetailTabs
+        tabs={[
+          { id: 'a', label: 'First', content: <p>Panel A</p> },
+          { id: 'b', label: 'Problems', count: 3, countIsProblem: true, content: <p>Panel B</p> },
+        ]}
+      />,
+    )
+    expect(screen.getByText('3')).toBeInTheDocument()
+  })
+})
+
+describe('ActionCard', () => {
   const noop = () => {}
 
-  it('shows the backend headline verbatim', () => {
+  const renderCard = (overrides: Partial<Parameters<typeof ActionCard>[0]> = {}) =>
     render(
-      <DecisionPanel
+      <ActionCard
         plan={plan}
         execution={null}
         busy={false}
         error={null}
         onExecute={noop}
         onRecompute={noop}
+        {...overrides}
       />,
     )
+
+  it('shows the backend headline verbatim', () => {
+    renderCard()
     expect(
       screen.getByText('Ship 7000 L of DIESEL from Patiya Depot to Mirpur Fuel Station now.'),
     ).toBeInTheDocument()
   })
 
   it('shows the verdict the backend gave', () => {
-    render(
-      <DecisionPanel
-        plan={plan}
-        execution={null}
-        busy={false}
-        error={null}
-        onExecute={noop}
-        onRecompute={noop}
-      />,
-    )
+    renderCard()
     expect(screen.getByText('RECOMMENDED')).toBeInTheDocument()
   })
 
-  it('publishes the declared numbers so the prose can be audited', () => {
-    render(
-      <DecisionPanel
-        plan={plan}
-        execution={null}
-        busy={false}
-        error={null}
-        onExecute={noop}
-        onRecompute={noop}
-      />,
-    )
+  it('publishes the declared numbers so the prose can be audited', async () => {
+    renderCard()
+    await userEvent.click(screen.getByText('Why this plan'))
     expect(screen.getByText('total_litres')).toBeInTheDocument()
     expect(screen.getByText('service_level')).toBeInTheDocument()
   })
 
-  it('separates the current-tick shipments from the advisory ones', () => {
-    render(
-      <DecisionPanel
-        plan={plan}
-        execution={null}
-        busy={false}
-        error={null}
-        onExecute={noop}
-        onRecompute={noop}
-      />,
-    )
-    expect(screen.getByText('Advisory — future ticks')).toBeInTheDocument()
-    expect(screen.getByText(/not written now/)).toBeInTheDocument()
+  it('separates the current-tick shipments from the advisory ones', async () => {
+    renderCard()
+    await userEvent.click(screen.getByText('Why this plan'))
+    expect(screen.getByText(/Advisory — future ticks/)).toBeInTheDocument()
+    // The advisory shipments carry their own "not written now" note, and the
+    // section heading says so too.
+    expect(screen.getAllByText(/not written now/).length).toBeGreaterThan(0)
   })
 
   it('does not dispatch until the operator confirms', async () => {
     const onExecute = vi.fn()
-    render(
-      <DecisionPanel
-        plan={plan}
-        execution={null}
-        busy={false}
-        error={null}
-        onExecute={onExecute}
-        onRecompute={noop}
-      />,
-    )
+    renderCard({ onExecute })
 
     // The first click arms the action, and must not dispatch.
-    await userEvent.click(screen.getByText('Dispatch current-tick shipments'))
+    await userEvent.click(screen.getByText(/^Dispatch /))
     expect(onExecute).not.toHaveBeenCalled()
 
     // The second click confirms it.
-    await userEvent.click(screen.getByText('Confirm dispatch'))
+    await userEvent.click(screen.getByText(/^Confirm — dispatch/))
     expect(onExecute).toHaveBeenCalledTimes(1)
   })
 
   it('lets the operator back out of the confirmation', async () => {
     const onExecute = vi.fn()
-    render(
-      <DecisionPanel
-        plan={plan}
-        execution={null}
-        busy={false}
-        error={null}
-        onExecute={onExecute}
-        onRecompute={noop}
-      />,
-    )
-    await userEvent.click(screen.getByText('Dispatch current-tick shipments'))
+    renderCard({ onExecute })
+    await userEvent.click(screen.getByText(/^Dispatch /))
     await userEvent.click(screen.getByText('Cancel'))
     expect(onExecute).not.toHaveBeenCalled()
   })
@@ -321,20 +343,11 @@ describe('DecisionPanel', () => {
       optimization: { ...plan.optimization, shipments_now: [], shipments_later: [] },
       gated: { ...plan.gated, executable_now: 0, deferred_to_future_ticks: 0 },
     }
-    render(
-      <DecisionPanel
-        plan={emptyPlan}
-        execution={null}
-        busy={false}
-        error={null}
-        onExecute={noop}
-        onRecompute={noop}
-      />,
-    )
+    renderCard({ plan: emptyPlan })
     expect(screen.getByText('Nothing to dispatch')).toBeDisabled()
   })
 
-  it('reports what a previous dispatch did', () => {
+  it('reports what a previous dispatch did', async () => {
     const execution = {
       ...plan,
       created: [{ id: 1 }],
@@ -342,17 +355,9 @@ describe('DecisionPanel', () => {
       failed: [],
       total_litres: 7000,
     }
-    render(
-      <DecisionPanel
-        plan={plan}
-        execution={execution}
-        busy={false}
-        error={null}
-        onExecute={noop}
-        onRecompute={noop}
-      />,
-    )
-    // The execution summary shows the created count and the dispatched volume.
+    renderCard({ execution })
+    await userEvent.click(screen.getByText('Why this plan'))
+
     const dispatched = screen.getByText('Dispatched').parentElement
     expect(dispatched).toHaveTextContent('7,000 L')
     expect(screen.getByText('Created').parentElement).toHaveTextContent('1')

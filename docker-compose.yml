@@ -4,8 +4,15 @@ services:
     container_name: buetcsefest-simulator-api
     environment:
       # Wall-clock ticks per second while the simulation is RUNNING.
-      SIMULATION_SPEED: ${SIMULATION_SPEED:-8}
-      # Simulated minutes advanced per tick.
+      #
+      # 0.1 -> one tick every 10 seconds. This is the SLOWEST the simulator can
+      # go: its runner sleeps `max(0.05, 1.0 / max(0.1, speed))`, and the
+      # `max(0.1, ...)` divisor floors the interval at 10s no matter how small
+      # the speed is. The requested 15-second tick is therefore not expressible
+      # in this simulator version -- 10s is the closest reachable value.
+      SIMULATION_SPEED: ${SIMULATION_SPEED:-0.1}
+      # Simulated minutes advanced per tick. 15 = one quarter-hour of demand
+      # per tick, matching the domain model's "15-minute tick clock".
       TICK_MINUTES: ${TICK_MINUTES:-15}
       # Start paused so tests drive ticks deterministically via /admin/step.
       SIMULATOR_START_MODE: ${SIMULATOR_START_MODE:-paused}
@@ -93,15 +100,30 @@ services:
       REDIS_URL: redis://redis:6379/0
       BACKEND_PORT: "8002"
       # Seconds without an SSE event while the world has advanced -> suspected drop.
-      SSE_STALE_AFTER: "20"
+      #
+      # Must comfortably exceed the simulator's tick interval (10s at
+      # SIMULATION_SPEED=0.1). Events arrive once per tick, so a threshold
+      # near the tick period would fire on a healthy but slow world. 45s gives
+      # ~4 ticks of slack before a drop is even suspected.
+      SSE_STALE_AFTER: "45"
       # Seconds of poller-only operation before we try to reclaim SSE.
       SSE_RECOVER_AFTER: "10"
-      POLL_INTERVAL: "2"
+      # Seconds between backend polls of the simulator. Set to half the tick
+      # interval so the backend always has a recent snapshot without polling
+      # faster than the world changes.
+      POLL_INTERVAL: "5"
       WATCHDOG_INTERVAL: "5"
       # Force a fresh SSE subscription after this long, bounding the blast
       # radius of an undetected silent drop.
       SSE_MAX_LIFETIME: "900"
-      STATE_MAX_AGE: "1.0"
+      # Seconds after which a snapshot is considered stale.
+      #
+      # MUST exceed POLL_INTERVAL. The snapshot can only ever be as fresh as
+      # the poll that captured it, so a threshold *below* the poll interval
+      # marks a perfectly healthy world stale for most of every poll cycle --
+      # and the console renders a red "Stale data" banner on a system that is
+      # working fine. 15s = three poll intervals of slack.
+      STATE_MAX_AGE: "15"
       EVENT_BUFFER: "200"
       SUBSCRIBER_QUEUE: "64"
       JOURNAL_PATH: /app/data/journal.sqlite3

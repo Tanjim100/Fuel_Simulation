@@ -1,85 +1,72 @@
 /**
- * The network column — depots, stations and routes as the operator sees them.
+ * The network — depots, stations and routes as the operator sees them.
  *
- * Every panel is a table over a backend payload. No client-side aggregation
- * of business figures beyond ratios and severity colouring.
+ * The old rendering was a five-column table per entity, with a nested
+ * three-cell meter grid inside a table cell. It rendered every number the
+ * backend had, and the operator had to work out which of them mattered.
+ *
+ * These are **compact rows**: one line per entity, carrying the one figure
+ * that changes a decision, with everything else one click away behind a
+ * disclosure. The status word becomes a dot — in a list of routes, the word
+ * "AVAILABLE" repeated six times is noise, and the colour already says it.
  */
 
 import type { Depot, FuelType, Route, Station } from '../api/types'
 import { FUEL_TYPES } from '../api/types'
-import { Badge, Empty, Meter, Panel } from './common'
+import { Badge, Dot, Empty, Meter, Panel } from './common'
+import { Disclosure } from './Disclosure'
 import { count, litres, percent, shortId } from '../lib/format'
 import {
   dispatchLevel,
+  emptiestTank,
   fillLevel,
   fillRatio,
   statusLevel,
 } from '../lib/derive'
 
-function fuelTone(station: Station, fuel: FuelType) {
-  const inventory = station.inventory?.[fuel] ?? 0
-  const capacity = station.capacity?.[fuel] ?? 0
-  const ratio = fillRatio(inventory, capacity)
-  return { ratio, level: fillLevel(ratio), inventory, capacity }
-}
-
 export function DepotPanel({ depots }: { depots: Depot[] }) {
   return (
-    <Panel title="Depots">
+    <Panel title="Depots" flush>
       {depots.length === 0 ? (
         <Empty title="No depots reported" />
       ) : (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Depot</th>
-              <th>Status</th>
-              <th className="num">Dispatch left</th>
-              <th className="num">Stock</th>
-            </tr>
-          </thead>
-          <tbody>
-            {depots.map((depot) => {
-              const level = dispatchLevel(depot.dispatch_remaining, depot.dispatch_capacity_per_tick)
-              const ratio = fillRatio(
-                depot.dispatch_remaining,
-                depot.dispatch_capacity_per_tick,
-              )
-              return (
-                <tr key={depot.id}>
-                  <td>
-                    <div className="entity">
-                      <span className="entity__name">{depot.name}</span>
-                      <span className="entity__meta">{depot.id}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <Badge level={statusLevel(depot.status)}>{depot.status}</Badge>
-                  </td>
-                  <td className="num">
-                    <div className="meter-row">
-                      <Meter ratio={ratio} level={level} />
-                      <span>{litres(depot.dispatch_remaining)} L</span>
-                    </div>
-                    <div className="tiny faint">
-                      cap {litres(depot.dispatch_capacity_per_tick)} L/tick
-                    </div>
-                  </td>
-                  <td className="num">{litres(depotTotal(depot.inventory))} L</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+        <div className="rows">
+          {depots.map((depot) => {
+            const level = dispatchLevel(depot.dispatch_remaining, depot.dispatch_capacity_per_tick)
+            const ratio = fillRatio(
+              depot.dispatch_remaining,
+              depot.dispatch_capacity_per_tick,
+            )
+            return (
+              <div className="row" key={depot.id}>
+                <Dot level={statusLevel(depot.status)} />
+                <div className="row__name">
+                  <span className="row__title">{depot.name}</span>
+                  <span className="row__meta">{depot.id}</span>
+                </div>
+                <div className="row__bar">
+                  <Meter ratio={ratio} level={level} />
+                </div>
+                <div className="row__figure">
+                  {litres(depot.dispatch_remaining)} L
+                  <span className="faint tiny"> of {litres(depot.dispatch_capacity_per_tick)} L</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
       )}
     </Panel>
   )
 }
 
-function depotTotal(inventory: Record<string, number>): number {
-  return Object.values(inventory).reduce((sum, value) => sum + (value || 0), 0)
-}
-
+/**
+ * The stations, one row each.
+ *
+ * The row shows the *emptiest* tank — the one that is about to run dry — and
+ * its fill ratio. Per-fuel detail is one click away, because it is only
+ * needed when the operator is deciding *which* fuel to move.
+ */
 export function StationPanel({
   stations,
   onSelect,
@@ -90,77 +77,81 @@ export function StationPanel({
   selectedStationId?: string | null
 }) {
   return (
-    <Panel title="Stations">
+    <Panel title="Stations" flush>
       {stations.length === 0 ? (
         <Empty title="No stations reported" />
       ) : (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Station</th>
-              <th>Status</th>
-              <th>Fuel level</th>
-              <th className="num">Free space</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stations.map((station) => {
-              const selected = station.id === selectedStationId
-              return (
-                <tr
-                  key={station.id}
-                  onClick={onSelect ? () => onSelect(station.id) : undefined}
-                  style={selected ? { background: 'var(--accent-bg)' } : undefined}
-                >
-                  <td>
-                    <div className="entity">
-                      <span className="entity__name">{station.name}</span>
-                      <span className="entity__meta">
-                        {station.id} · {station.demand_profile}
-                        {station.is_single_connected ? ' · single-connected' : ''}
-                      </span>
-                    </div>
-                  </td>
-                  <td>
-                    <Badge level={statusLevel(station.status)}>{station.status}</Badge>
-                    {station.demand_multiplier > 1.05 ? (
-                      <>
-                        {' '}
-                        <Badge level="warn">×{station.demand_multiplier}</Badge>
-                      </>
-                    ) : null}
-                  </td>
-                  <td>
-                    <div className="fuel-grid">
-                      {FUEL_TYPES.map((fuel) => {
-                        const { ratio, level } = fuelTone(station, fuel)
-                        return (
-                          <div className="fuel-cell" key={fuel}>
-                            <div className="fuel-cell__name">{fuel.slice(0, 3)}</div>
-                            <div className="fuel-cell__value">{percent(ratio, 0)}</div>
-                            <Meter ratio={ratio} level={level} />
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </td>
-                  <td className="num">
-                    {FUEL_TYPES.map((fuel) => (
-                      <div key={fuel} className="tiny">
-                        {fuel.slice(0, 3)} {litres(station.free_space?.[fuel])} L
-                      </div>
-                    ))}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+        <div className="rows">
+          {stations.map((station) => {
+            const selected = station.id === selectedStationId
+            const tank = emptiestTank(station)
+            return (
+              <div
+                className="row"
+                key={station.id}
+                onClick={onSelect ? () => onSelect(station.id) : undefined}
+                style={selected ? { background: 'var(--accent-bg)' } : undefined}
+              >
+                <Dot level={statusLevel(station.status)} />
+                <div className="row__name">
+                  <span className="row__title">{station.name}</span>
+                  <span className="row__meta">
+                    {station.id}
+                    {station.is_single_connected ? ' · single-connected' : ''}
+                  </span>
+                </div>
+                {station.demand_multiplier > 1.05 ? (
+                  <Badge level="warn">×{station.demand_multiplier}</Badge>
+                ) : null}
+                <div className="row__bar">
+                  <Meter ratio={tank.ratio} level={tank.level} />
+                </div>
+                <div className="row__figure">
+                  {percent(tank.ratio, 0)}
+                  <span className="faint tiny"> {tank.fuel.toLowerCase()}</span>
+                </div>
+                <StationDetail station={station} />
+              </div>
+            )
+          })}
+        </div>
       )}
     </Panel>
   )
 }
 
+/** The per-fuel breakdown for one station, behind a disclosure. */
+function StationDetail({ station }: { station: Station }) {
+  return (
+    <Disclosure label="Fuel levels">
+      <div className="fuel-grid" style={{ marginTop: 12 }}>
+        {FUEL_TYPES.map((fuel) => {
+          const inventory = station.inventory?.[fuel] ?? 0
+          const capacity = station.capacity?.[fuel] ?? 0
+          const ratio = fillRatio(inventory, capacity)
+          return (
+            <div className="fuel-cell" key={fuel}>
+              <div className="fuel-cell__name">{fuel}</div>
+              <div className="fuel-cell__value">{percent(ratio, 0)}</div>
+              <Meter ratio={ratio} level={fillLevel(ratio)} />
+              <div className="fuel-cell__pct">
+                {litres(inventory)} / {litres(capacity)} L
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </Disclosure>
+  )
+}
+
+/**
+ * The routes.
+ *
+ * One line per route. The route id and the per-shipment maximum are there
+ * for the operator who is checking a specific constraint; the everyday
+ * reading — is this route open, and how long does it take — is on the line.
+ */
 export function RoutePanel({ routes }: { routes: Route[] }) {
   const disrupted = routes.filter((r) => r.status !== 'AVAILABLE')
   const single = routes.filter((r) => r.is_single_connected)
@@ -175,49 +166,47 @@ export function RoutePanel({ routes }: { routes: Route[] }) {
           <Badge level="ok">all available</Badge>
         )
       }
+      flush
     >
       {routes.length === 0 ? (
         <Empty title="No routes reported" />
       ) : (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Route</th>
-              <th>Status</th>
-              <th className="num">Transit</th>
-              <th className="num">Max</th>
-            </tr>
-          </thead>
-          <tbody>
-            {routes.map((route) => (
-              <tr key={route.id}>
-                <td>
-                  <div className="entity">
-                    <span className="entity__name">
-                      {shortId(route.source_depot_id)} → {shortId(route.destination_station_id)}
-                    </span>
-                    <span className="entity__meta">
-                      {route.id}
-                      {route.is_single_connected ? ' · only route' : ''}
-                    </span>
-                  </div>
-                </td>
-                <td>
-                  <Badge level={statusLevel(route.status)}>{route.status}</Badge>
-                </td>
-                <td className="num">{route.transit_ticks} t</td>
-                <td className="num">{litres(route.max_shipment)} L</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="rows">
+          {routes.map((route) => (
+            <div className="row" key={route.id}>
+              <Dot level={statusLevel(route.status)} />
+              <div className="row__name">
+                <span className="row__title">
+                  {shortId(route.source_depot_id)} → {shortId(route.destination_station_id)}
+                </span>
+                <span className="row__meta">{route.id}</span>
+              </div>
+              {/*
+                * A healthy route needs no word — the dot says it. A broken
+                * route does: "disrupted" is the thing the operator acts on.
+                */}
+              {route.status !== 'AVAILABLE' ? (
+                <Badge level={statusLevel(route.status)}>{route.status}</Badge>
+              ) : null}
+              {route.is_single_connected ? <Badge level="warn">only route</Badge> : null}
+              <div className="row__figure">
+                {route.transit_ticks} t
+                <span className="faint tiny"> · {litres(route.max_shipment)} L max</span>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
       {single.length > 0 ? (
-        <p className="hint" style={{ marginTop: 12, marginBottom: 0 }}>
-          {count(single.length)} route(s) serve a single-connected station — if one is disrupted,
-          that station cannot be rerouted.
-        </p>
+        <div style={{ padding: '12px 20px 16px' }}>
+          <p className="hint" style={{ margin: 0 }}>
+            {count(single.length)} route(s) serve a single-connected station — if one is disrupted,
+            that station cannot be rerouted.
+          </p>
+        </div>
       ) : null}
     </Panel>
   )
 }
+
+export type { FuelType }

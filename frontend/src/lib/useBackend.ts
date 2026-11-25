@@ -57,8 +57,14 @@ export interface BackendData {
   execute: () => Promise<void>
 }
 
-/** How often the console re-reads the world over REST. */
-const POLL_MS = 4000
+/**
+ * How often the console re-reads the world over REST.
+ *
+ * The simulator ticks every 10 seconds, so a faster poll would only re-read
+ * the same snapshot. The SSE stream nudges the console the moment a tick
+ * actually lands; this interval is the safety net for when that stream drops.
+ */
+const POLL_MS = 5000
 
 export function useBackend(): BackendData {
   const [health, setHealth] = useState<Health | null>(null)

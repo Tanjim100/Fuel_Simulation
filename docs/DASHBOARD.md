@@ -115,48 +115,108 @@ source.onmessage = () => { setStreamState('live'); refreshRef.current() }
 source.onerror  = () => { setStreamState('polling'); source.close(); /* reconnect in 3s */ }
 ```
 
-Polling continues underneath at `POLL_MS = 4000`, so a dropped stream degrades to
+Polling continues underneath at `POLL_MS = 5000`, so a dropped stream degrades to
 a slower but still-correct console — and the telemetry bar *says* it has done so
 rather than pretending everything is fine.
+
+The simulator ticks every **10 real seconds** and each tick advances the
+simulated clock by 15 minutes, so the console shows a quarter-hour of activity
+roughly every ten seconds. The stream delivers one event per tick, and the poll
+interval is half a tick — polling faster would only re-read the same snapshot.
 
 ---
 
 ## 3. The screen
 
-Three columns, read left to right: **the network**, **the decision**, **the
-intelligence**.
+**One column. One hero. One panel at a time.**
+
+The console was redesigned because the operator had to read too much to learn
+too little: ten panels across three columns, every one of them expanded, ten
+statistics in the telemetry bar, and the actual decision — *what should I do,
+and is it safe?* — buried in a corner of it. The redesign changes the layout
+and nothing else: every guarantee below survives it.
 
 ```
-┌─ Telemetry bar ──────────────────────────────────────────────────────────┐
-│ tick 42 · service 91.6% · disrupted 1 · closed 0 · mode SSE · 2s old     │
+┌─ Status bar ─────────────────────────────────────────────────────────────┐
+│ ● NOMINAL   Service 91.6%   Disrupted 1   Closed 0   Dispatched 12  ☀ ⋯ │
 └──────────────────────────────────────────────────────────────────────────┘
-┌─ Network ──────────────┐ ┌─ Decision ──────────────┐ ┌─ Intelligence ─────┐
-│ Depots                 │ │ Recommended plan        │ │ Forecast            │
-│  Gazipur Depot  ●      │ │ Ship 7,000 L DIESEL     │ │  10,302 L  82%      │
-│  Patiya Depot   ●      │ │  Gazipur → Mirpur       │ │  ▁▂▃▄▅ sparkline   │
-│ Stations               │ │                         │ │ Demand by fuel      │
-│  Mirpur Fuel Station   │ │ total_litres  7,000     │ │  DIESEL  ████░      │
-│  ×1.8 demand spike     │ │ service_level  0.92     │ │  PETROL  ███░░      │
-│ Routes                 │ │                         │ │ Anomalies           │
-│  gazipur → mirpur  ⚠   │ │ [Dispatch current-tick] │ │  route disrupted    │
-│  DISRUPTED             │ │                         │ │ Incidents           │
-└─────────────────────────┘ └─────────────────────────┘ └─────────────────────┘
+┌─ The action ─────────────────────────────────────────────────────────────┐
+│ RECOMMENDED                                              [ Recompute ]   │
+│ Ship 7000 L of DIESEL from Patiya Depot to Mirpur Fuel Station now.     │
+│ patiya → mirpur · DIESEL                                                  │
+│ Mirpur DIESEL runs dry in 2 ticks                                         │
+│                                                                          │
+│ Planned volume     Projected service     Shippable now    Gate            │
+│ 7,000 L            92.0%                 1                4 ok / 0 no    │
+│                                                                          │
+│ [ Dispatch 7,000 L ]   [ Details ]                                       │
+└──────────────────────────────────────────────────────────────────────────┘
+┌─ Network 2 ──────────┐ ┌─ Forecast 12 ─────────┐ ┌─ Problems 1 ─────────┐
+│ Depots               │ │ Forecast              │ │ Anomalies            │
+│  Gazipur Depot  ▓▓▓  │ │  10,302 L  82%       │ │  route disrupted     │
+│ Stations             │ │  DIESEL  ████░        │ │  ▸ Evidence          │
+│  Mirpur    ▓▓░░ 40%  │ │  ▁▂▃▄▅ sparkline     │ │ Incidents            │
+│ Routes               │ │  Mirpur   DIESEL      │ │  1 anomaly on route  │
+│  gazipur → mirpur ⚠  │ │    0 L  0 ticks  100% │ │                      │
+└──────────────────────┘ └───────────────────────┘ └──────────────────────┘
 ```
 
-### The panels
+### The three layers of the screen
+
+| Layer | Component | Shows | Backend source |
+| :--- | :--- | :--- | :--- |
+| **Status** | `StatusBar` | overall verdict, service level, disrupted routes, closed stations, dispatched count | `/api/metrics`, `/api/routes`, `/api/stations` |
+| **Action** | `ActionCard` | the plan headline, the why, the volume, the gate, the dispatch button | `/api/optimize` |
+| **Detail** | `DetailTabs` | Network, Forecast and Problems — one rendered at a time | every read endpoint |
+
+Inside the tabs, the panels are unchanged in responsibility but rewritten in
+density:
 
 | Panel | Shows | Backend source |
 | :--- | :--- | :--- |
-| `TelemetryBar` | tick, service level, disrupted/closed counts, stream mode, snapshot age | `/api/metrics`, `/api/stream-health` |
 | `StaleBanner` | "Stale data" / "Upstream unreachable" | `/api/stream-health` |
-| `DepotPanel` | depot name, status, inventory total, per-tick dispatch cap | `/api/depots` |
-| `StationPanel` | station name, status, fill meter, single-connected flag, demand multiplier | `/api/stations` |
-| `RoutePanel` | depot → station, status, transit ticks, disrupted count | `/api/routes` |
-| `DecisionPanel` | the plan headline, the declared numbers, dispatch control | `/api/optimize` |
-| `ForecastPanel` | total demand, stockout probability, ticks to stockout, sparkline | `/api/forecast/summary` |
-| `DemandPanel` | demand broken down by fuel, against coverage | `/api/forecast/summary` |
-| `AnomalyPanel` | anomaly title, detail, the metrics behind it, recommended action | `/api/anomalies` |
+| `DepotPanel` | depot name, dispatch headroom and the per-tick cap | `/api/depots` |
+| `StationPanel` | station name, the *emptiest* tank's fill, per-fuel detail behind a disclosure | `/api/stations` |
+| `RoutePanel` | depot → station, transit ticks, a status badge when the route is broken | `/api/routes` |
+| `ForecastPanel` | total demand, demand by fuel, stockout probability, ticks to stockout, sparkline | `/api/forecast/summary` |
+| `AnomalyPanel` | anomaly title, recommended action, the metrics behind an "Evidence" disclosure | `/api/anomalies` |
 | `IncidentPanel` | grouped incidents | `/api/incidents` |
+
+### The dots are load-bearing
+
+A row that is obviously a route does not need the word "AVAILABLE" repeated
+six times — the **dot** carries the status, and the colour says it. Text badges
+survive only where the status *is* the point:
+
+- a **disrupted route** keeps the word `DISRUPTED`, because that is the thing
+  the operator acts on;
+- the **verdict** (`RECOMMENDED` / `CAUTION` / `BLOCKED`) is a badge;
+- the **Problems** tab carries a count badge, so a problem is never invisible
+  behind a tab the operator did not open.
+
+The single exception is a station's *emptiest* tank. The station row shows one
+figure — the tank that is about to run dry — because "which tank is about to
+run dry" is the operator's question, and "what is the state of every tank" is
+not. The per-fuel breakdown is one click away.
+
+### The theme
+
+Dark by default, with a light theme behind a toggle in the status bar. The
+toggle writes `data-theme` onto `document.documentElement`, persists the
+choice in `localStorage`, and falls back to `prefers-color-scheme` when
+nothing is stored.
+
+The token *names* never change between themes — only their values do — so no
+component carries theme logic at all. `color-scheme` flips with the theme, so
+native scrollbars and form controls match.
+
+### Narrow screens
+
+The single centred column reflows below 720px: the status bar's brand block
+drops to one line above the facts, and a row's meter drops to its own line
+under the name and the figure rather than overflowing. This came free with the
+one-column layout — there is no second layout to keep in sync, because there is
+only one.
 
 ### The sparkline is the backend's own projection
 
@@ -169,13 +229,16 @@ already accounts for the measured `+1` arrival lag.
 ### The dispatch button takes two clicks
 
 ```
-[ Dispatch current-tick shipments ]   →  [ Confirm dispatch ]  [ Cancel ]
+[ Dispatch 7,000 L ]   →   [ Confirm — dispatch 7,000 L ]   [ Cancel ]
 ```
 
 The first click **arms** the action and dispatches nothing. The second confirms.
 A fuel dispatch is not undoable — the simulator records it, the journal records
 it, and the tick's dispatch cap is consumed. So the console makes the operator
 say it twice.
+
+The volume on the button is the backend's own `total_litres` — the console does
+not recompute it.
 
 The plan is also split into what is written now and what is advisory:
 
@@ -201,14 +264,15 @@ the confirmed button.
 frontend/src/test/
 ├── derive.test.ts             43   the pure derivations
 ├── format.test.ts             29   the formatting
-├── panels.test.tsx            34   every panel, against real payloads
+├── panels.test.tsx            39   every panel, against real payloads
 ├── stream.test.ts              3   SSE is advisory; drop degrades; reconnect works
 ├── no-invented-numbers.test.tsx 7   the central invariant
+├── theme.test.ts               8   the toggle, the persistence, the fallbacks
 ├── live.test.tsx               3   the same, against the running stack
 └── fixtures.ts                     real backend payloads, copied verbatim
 ```
 
-**116 passed, 3 skipped** (the live tests skip without `LIVE_BACKEND`).
+**132 passed, 3 skipped** (the live tests skip without `LIVE_BACKEND`).
 
 The fixtures are **copied verbatim from real backend responses** — not
 hand-written approximations. A test that passes against a made-up payload proves
@@ -226,6 +290,22 @@ backend, so it exercises the real payload shapes, the real panel wiring and the
 real no-invented-numbers guarantee — end to end, against the live simulator's
 world.
 
+### The live test captures the console's own responses
+
+The simulator is a **live world**: it ticks between requests. So the live
+invariant test cannot snapshot the endpoints separately and then render — the
+snapshot would be from a different tick than the render, and every figure that
+moved in between would look "invented" when it is merely from a later tick.
+
+Instead the test wraps `fetch` and records **the responses the console itself
+received**. The allow-list is built from exactly those bodies. A figure the
+console invented would not be in them, and a figure that moved between ticks
+still would.
+
+This is a subtlety worth stating plainly: the test is checking the console, not
+the simulator's consistency. The console's guarantee is "every number on screen
+came from a backend response" — and the captured responses are exactly that.
+
 ### Two scripts that guard the build
 
 ```json
@@ -237,6 +317,11 @@ world.
 and a stale one will happily skip a check that should have failed — so a broken
 test file would sail through `tsc --noEmit` and then fail the build. This bit
 us once during development, and the fix is permanent.
+
+**The Docker build is the honest check.** `npm run build` on a developer
+machine can be masked by a leftover `tsbuildinfo`; the container's build starts
+from a clean checkout with no cache, so it catches what the local run can miss.
+When the two disagree, the container is right.
 
 ---
 
@@ -284,7 +369,7 @@ readable over HTTP.
 | Client-side state management | One `useBackend` hook holds one world snapshot. Redux would be a solution to a problem this screen does not have. |
 | Optimistic updates | The world is the simulator's. Rendering a guess as if it were the truth would break the one rule. |
 | A login screen | The console is bound to the compose network and the operator is whoever can reach it. Authentication belongs at the edge, in front of the whole stack. |
-| Mobile layout | This is an operator console, read at a desk during a shift. |
+| A bespoke mobile layout | This is an operator console, read at a desk during a shift. The single centred column *does* reflow on a narrow screen — that came free with the redesign — but it is not a phone application and no one pretended otherwise. |
 
 ---
 
@@ -296,21 +381,25 @@ frontend/
 ├── server.mjs                the proxy + static server
 ├── vite.config.ts            dev proxy, test config
 ├── src/
-│   ├── App.tsx               the three-column layout
+│   ├── App.tsx               the focus + drill-down layout
 │   ├── api/
 │   │   ├── types.ts           hand-written types mirroring the backend
 │   │   └── client.ts          the only place that talks to the backend
 │   ├── lib/
 │   │   ├── format.ts          rendering only
 │   │   ├── derive.ts          the pure derivations
+│   │   ├── useTheme.ts        the dark/light preference
 │   │   └── useBackend.ts      the world hook, SSE + polling
 │   ├── components/
-│   │   ├── common.tsx         Panel, Badge, Stat, Meter, Empty, ErrorBox
-│   │   ├── TelemetryBar.tsx   TelemetryBar, StaleBanner
+│   │   ├── common.tsx         Panel, Badge, Dot, Stat, Meter, Empty, ErrorBox
+│   │   ├── StatusBar.tsx      the slim top bar + the theme toggle
+│   │   ├── ActionCard.tsx     the hero: the plan, the why, the dispatch
+│   │   ├── DetailTabs.tsx     the tab strip, one panel at a time
+│   │   ├── Disclosure.tsx     the reusable expander
+│   │   ├── TelemetryBar.tsx   StaleBanner (the freshness contract)
 │   │   ├── NetworkPanel.tsx   DepotPanel, StationPanel, RoutePanel
-│   │   ├── DecisionPanel.tsx  the plan and the dispatch control
-│   │   ├── ForecastPanel.tsx  ForecastPanel, DemandPanel
-│   │   └── AnomalyPanel.tsx   AnomalyPanel, IncidentPanel, JournalPanel
+│   │   ├── ForecastPanel.tsx  the merged forecast tab
+│   │   └── AnomalyPanel.tsx   AnomalyPanel, IncidentPanel
 │   └── test/                  the suite
 ```
 

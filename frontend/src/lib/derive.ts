@@ -202,3 +202,61 @@ export function coverageDays(coverageTicks: number, tickMinutes: number): number
   const minutesPerDay = 24 * 60
   return (coverageTicks * tickMinutes) / minutesPerDay
 }
+
+/**
+ * The emptiest tank at a station, and how full it is.
+ *
+ * The console shows one figure per station rather than three, because the
+ * operator's question is "which tank is about to run dry", not "what is the
+ * state of every tank". The emptiest one is the answer to that question.
+ *
+ * The ratio is the *same* `fillRatio` the per-fuel panels use, so this is a
+ * selection over existing derivations — not a new calculation. A fuel the
+ * backend did not report counts as empty, for the same reason it does
+ * everywhere else: an unknown capacity cannot justify calling a tank healthy.
+ */
+export function emptiestTank(
+  station: Station,
+): { fuel: FuelType; ratio: number; level: HealthLevel } {
+  let worst: { fuel: FuelType; ratio: number; level: HealthLevel } | null = null
+
+  for (const fuel of FUEL_TYPES) {
+    const ratio = fillRatio(station.inventory?.[fuel] ?? 0, station.capacity?.[fuel] ?? 0)
+    if (worst === null || ratio < worst.ratio) {
+      worst = { fuel, ratio, level: fillLevel(ratio) }
+    }
+  }
+
+  // `FUEL_TYPES` is a non-empty constant, so this branch is unreachable in
+  // practice — but the type system cannot know that, and a fallback that
+  // invents a fuel name would be worse than an honest "no data".
+  return worst ?? { fuel: 'DIESEL', ratio: 0, level: 'danger' }
+}
+
+/**
+ * The forecast demand, totalled by fuel.
+ *
+ * The backend reports demand per station/fuel pair and a grand total; it
+ * does **not** report a per-fuel total. The console shows one bar per fuel,
+ * so it has to add the pairs up — and that sum is a derived figure, which
+ * means it has to live here, with a name, where the no-invented-numbers
+ * test can see it.
+ *
+ * This is the one place in the console where a total is computed rather
+ * than read. It is a sum of backend numbers and nothing else.
+ */
+export function demandByFuel(
+  entries: Array<{ fuel_type: string; total_demand_litres: number }>,
+): Array<{ fuel: string; litres: number }> {
+  const totals = new Map<string, number>()
+
+  for (const entry of entries) {
+    const value = entry.total_demand_litres
+    if (!Number.isFinite(value)) continue
+    totals.set(entry.fuel_type, (totals.get(entry.fuel_type) ?? 0) + value)
+  }
+
+  return [...totals.entries()]
+    .map(([fuel, value]) => ({ fuel, litres: value }))
+    .sort((a, b) => b.litres - a.litres)
+}

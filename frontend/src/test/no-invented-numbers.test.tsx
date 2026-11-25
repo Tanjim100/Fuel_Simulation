@@ -24,13 +24,15 @@
 
 import { describe, expect, it } from 'vitest'
 import { render } from '@testing-library/react'
+import { ActionCard } from '../components/ActionCard'
 import { AnomalyPanel } from '../components/AnomalyPanel'
-import { DecisionPanel } from '../components/DecisionPanel'
 import { ForecastPanel } from '../components/ForecastPanel'
 import { DepotPanel, RoutePanel, StationPanel } from '../components/NetworkPanel'
-import { TelemetryBar } from '../components/TelemetryBar'
+import { StatusBar } from '../components/StatusBar'
 import {
   depotTotal,
+  demandByFuel,
+  emptiestTank,
   fillRatio,
   stationTotal,
 } from '../lib/derive'
@@ -160,6 +162,22 @@ function derivedNumbers(): Set<number> {
     }
   }
 
+  // The emptiest tank per station. The station row shows the *worst* tank,
+  // and the row's ratio is one of the ratios above — but the selection is
+  // its own derivation, so it is declared here too.
+  for (const station of stations) {
+    const tank = emptiestTank(station)
+    add(tank.ratio)
+    add(tank.ratio * 100)
+  }
+
+  // The demand totalled by fuel. The backend reports demand per
+  // station/fuel pair; the console shows one bar per fuel, so it sums the
+  // pairs. That sum is a derived figure and is declared here.
+  for (const entry of demandByFuel(forecast.stations)) {
+    add(entry.litres)
+  }
+
   // Dispatch headroom as a fraction of the per-tick cap.
   for (const depot of depots) {
     const ratio = fillRatio(depot.dispatch_remaining, depot.dispatch_capacity_per_tick)
@@ -204,17 +222,19 @@ function assertNoInventedNumbers(container: HTMLElement, label: string) {
 }
 
 describe('the console invents no numbers', () => {
-  it('the telemetry bar renders only backend figures', () => {
+  it('the status bar renders only backend figures', () => {
     const { container } = render(
-      <TelemetryBar
+      <StatusBar
         health={null}
         broker={broker}
         metrics={metrics}
         stations={stations}
         routes={routes}
+        theme="dark"
+        onToggleTheme={() => {}}
       />,
     )
-    assertNoInventedNumbers(container, 'TelemetryBar')
+    assertNoInventedNumbers(container, 'StatusBar')
   })
 
   it('the depot panel renders only backend figures', () => {
@@ -242,9 +262,9 @@ describe('the console invents no numbers', () => {
     assertNoInventedNumbers(container, 'AnomalyPanel')
   })
 
-  it('the decision panel renders only backend figures', () => {
+  it('the action card renders only backend figures', () => {
     const { container } = render(
-      <DecisionPanel
+      <ActionCard
         plan={plan}
         execution={null}
         busy={false}
@@ -253,6 +273,6 @@ describe('the console invents no numbers', () => {
         onRecompute={() => {}}
       />,
     )
-    assertNoInventedNumbers(container, 'DecisionPanel')
+    assertNoInventedNumbers(container, 'ActionCard')
   })
 })

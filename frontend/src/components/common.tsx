@@ -61,12 +61,29 @@ export function Stat({
   level?: HealthLevel
 }) {
   return (
-    <div className="stat">
-      <span className="stat__label">{label}</span>
-      <span className={`stat__value stat__value--${level}`}>{value}</span>
-      {sub ? <span className="stat__sub">{sub}</span> : null}
+    <div className="fact">
+      <span className="fact__label">{label}</span>
+      <span className={`fact__value fact__value--${level}`}>{value}</span>
+      {sub ? <span className="tiny faint">{sub}</span> : null}
     </div>
   )
+}
+
+/**
+ * A status dot.
+ *
+ * The same colour semantics as `Badge`, at a fraction of the visual weight.
+ * Used where the surrounding context already implies what the status is — a
+ * row in the "Routes" list does not need to shout "AVAILABLE".
+ */
+export function Dot({
+  level = 'neutral',
+  pulse,
+}: {
+  level?: HealthLevel
+  pulse?: boolean
+}) {
+  return <span className={`dot dot--${level}${pulse ? ' dot--pulse' : ''}`} />
 }
 
 export function Meter({ ratio, level }: { ratio: number; level: HealthLevel }) {

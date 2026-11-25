@@ -32,6 +32,15 @@ DOM, extracts every number, and checks each one against an allow-list computed f
 backend sent it, or if a named function in `src/lib/derive.ts` produced it. The live
 variant of that same test runs against the running stack.
 
+**The screen was redesigned after the first build.** The first version was functionally
+complete but genuinely hard to use — ten panels across three columns, all expanded, ten
+statistics in the telemetry bar, and the operator's actual question (*what should I do,
+and is it safe?*) answered in a corner of a wall of tables. The redesign makes it **one
+column, one hero, one panel at a time**: a slim status bar, a single action card
+carrying the plan and the dispatch button, and three tabs with everything else one click
+away. It also gained a **light and a dark theme**. The layout changed; the arithmetic did
+not — every guarantee below survived the redesign unchanged.
+
 The second headline result is a **production-grade incident**, found only by running the
 complete stack under the console's load. The simulator's SQLAlchemy connection pool
 wedged completely — every endpoint except `/v1/health` blocked for 30 seconds, while
@@ -46,28 +55,70 @@ delivered.
 
 ### A. The console (`frontend/`)
 
-A **three-column operator console**, read left to right: **the network**, **the decision**,
-**the intelligence**.
+An **operator console** built as one column, one hero, one panel at a time: a slim status
+bar, a single action card carrying the plan and the dispatch button, and three tabs —
+**Network**, **Forecast**, **Problems** — with everything else one click away behind a
+disclosure. Dark and light themes, toggled from the status bar and remembered across
+reloads.
+
+**What the redesign fixed.** The previous screen showed ten panels across three columns, all
+expanded, with ten statistics in the telemetry bar and the actual decision buried in a
+corner of it. The operator had to read too much to learn too little. The new screen shows
+four facts, one decision, and drills down on demand — and the tabs carry counts, so a
+problem is never hidden behind a tab nobody opened.
+
+The single centred column also **reflows on a narrow screen**: below 720px the status
+bar's brand drops to one line above the facts, and a row's meter drops to its own line
+under the name and the figure rather than overflowing. That came free with the
+one-column layout — there is only one layout, so there is no second one to keep in sync.
+
+### G. The tick clock was retuned to a readable pace
+
+The first build ran at `SIMULATION_SPEED=8` — **6.4 ticks per second**, so a whole
+simulated day passed every 12 real seconds. Correct, but unreadable: the console's
+figures changed faster than anyone could read them, and the backend was polling a
+moving target 25 times a second.
+
+The clock now runs at **one tick every 10 real seconds**, with each tick advancing the
+simulated clock by 15 minutes — a quarter-hour of supply-chain activity every ten
+seconds. 10 seconds is the slowest the simulator allows: its runner sleeps
+`max(0.05, 1.0 / max(0.1, speed))`, and that inner `max(0.1, ...)` floors the interval
+at 10s regardless of how small the speed is set. A 15-second tick is not expressible
+in this simulator version.
+
+Two backend timings were calibrated against the old fast world and had to move with it:
+`SSE_STALE_AFTER` (20s → 45s, because events now arrive once per 10s tick and a 20s
+threshold would have fired on a *healthy* world) and `POLL_INTERVAL` (2s → 5s, half a
+tick, because polling twice a second only re-read the same snapshot). The console's
+`POLL_MS` moved the same way (4s → 5s). Verified: `suspected_drops: 0`, `mode: sse`.
+
+The redesign changed the **layout, not the arithmetic**. Every guarantee below survived it
+unchanged — no invented numbers, SSE advisory, two-click dispatch. Two new named
+derivations were added to `lib/derive.ts` (the emptiest tank at a station; demand totalled
+by fuel) rather than computed inline, so the invariant test could see them.
 
 ```
-┌─ Telemetry bar ──────────────────────────────────────────────────────────┐
-│ tick 42 · service 91.6% · disrupted 1 · closed 0 · mode SSE · 2s old     │
+┌─ Status bar ─────────────────────────────────────────────────────────────┐
+│ ● NOMINAL   Service 91.6%   Disrupted 1   Closed 0   Dispatched 12  ☀ ⋯ │
 └──────────────────────────────────────────────────────────────────────────┘
-┌─ Network ──────────────┐ ┌─ Decision ──────────────┐ ┌─ Intelligence ─────┐
-│ Depots                 │ │ Recommended plan        │ │ Forecast            │
-│  Gazipur Depot  ●      │ │ Ship 7,000 L DIESEL     │ │  10,302 L  82%      │
-│ Stations               │ │  Gazipur → Mirpur       │ │  ▁▂▃▄▅ sparkline   │
-│  Mirpur Fuel Station   │ │                         │ │ Demand by fuel      │
-│  ×1.8 demand spike     │ │ total_litres  7,000     │ │  DIESEL  ████░      │
-│ Routes                 │ │ service_level  0.92     │ │  PETROL  ███░░      │
-│  gazipur → mirpur  ⚠   │ │                         │ │ Anomalies           │
-└─────────────────────────┘ │ [Dispatch current-tick] │ │ Incidents           │
-                           └─────────────────────────┘ └─────────────────────┘
+┌─ The action ─────────────────────────────────────────────────────────────┐
+│ RECOMMENDED                                              [ Recompute ]   │
+│ Ship 7000 L of DIESEL from Patiya Depot to Mirpur Fuel Station now.     │
+│ patiya → mirpur · DIESEL                                                  │
+│ Mirpur DIESEL runs dry in 2 ticks                                         │
+│ Planned volume 7,000 L · Projected service 92.0% · Shippable now 1      │
+│ [ Dispatch 7,000 L ]   [ Details ]                                       │
+└──────────────────────────────────────────────────────────────────────────┘
+┌─ Network 2 ──────────┐ ┌─ Forecast 12 ─────────┐ ┌─ Problems 1 ─────────┐
+│ Depots  ● Gazipur    │ │ Forecast 10,302 L 82%│ │ Anomalies            │
+│ Stations ● Mirpur 40% │ │ DIESEL ████░         │ │  route disrupted     │
+│ Routes ⚠ gazipur→mirpur│ │ ▁▂▃▄▅ sparkline     │ │  ▸ Evidence          │
+└──────────────────────┘ └───────────────────────┘ └──────────────────────┘
 ```
 
-Ten panels, every one fed by a named backend endpoint: `TelemetryBar`, `StaleBanner`,
-`DepotPanel`, `StationPanel`, `RoutePanel`, `DecisionPanel`, `ForecastPanel`,
-`DemandPanel`, `AnomalyPanel`, `IncidentPanel`.
+Every panel, every one fed by a named backend endpoint: `StatusBar`, `StaleBanner`,
+`ActionCard`, `DepotPanel`, `StationPanel`, `RoutePanel`, `ForecastPanel`,
+`AnomalyPanel`, `IncidentPanel`.
 
 ### B. The three-layer split — the structural guarantee
 
@@ -124,14 +175,14 @@ source.onmessage = () => { setStreamState('live'); refreshRef.current() }
 source.onerror  = () => { setStreamState('polling'); source.close(); /* reconnect in 3s */ }
 ```
 
-Polling continues underneath at `POLL_MS = 4000`, so a dropped stream degrades to a
-slower but still-correct console — and the telemetry bar *says* it has done so rather
+Polling continues underneath at `POLL_MS = 5000`, so a dropped stream degrades to a
+slower but still-correct console — and the status bar *says* it has done so rather
 than pretending everything is fine.
 
 ### E. The dispatch button takes two clicks
 
 ```
-[ Dispatch current-tick shipments ]   →  [ Confirm dispatch ]  [ Cancel ]
+[ Dispatch 7,000 L ]   →   [ Confirm — dispatch 7,000 L ]   [ Cancel ]
 ```
 
 The first click **arms** the action and dispatches nothing. The second confirms. A fuel
@@ -195,19 +246,35 @@ systematically wrong.
 
 ### Finding 3 — The console's own numbers are verifiable against the live stack
 
-The live test (`src/test/live.test.tsx`) re-fetches all eight live payloads, renders the
-whole `App`, and checks the rendered console against them — including the
-no-invented-numbers guarantee, end to end, against the live simulator's world. The
-fixtures in `src/test/fixtures.ts` are **copied verbatim from real backend responses**,
-not hand-written approximations; a test that passes against a made-up payload proves
-nothing about a payload the backend actually sends.
+The live test (`src/test/live.test.tsx`) renders the whole `App` against the running
+backend and checks the rendered console against **the responses the console itself
+received** — including the no-invented-numbers guarantee, end to end, against the live
+simulator's world. The fixtures in `src/test/fixtures.ts` are **copied verbatim from real
+backend responses**, not hand-written approximations; a test that passes against a made-up
+payload proves nothing about a payload the backend actually sends.
+
+**A subtlety the live test taught us.** The first version of this test snapshotted the
+eight endpoints separately, *then* rendered. Against a live simulator that is a race: the
+world ticks between the snapshot and the render, so every figure that moved in between
+looked "invented" — the plan's `total_litres`, the tick number, a fill ratio. The console
+was innocent; the *sampling* was wrong. The fix is to wrap `fetch` and record the bodies
+the console actually fetched, then build the allow-list from exactly those. A figure the
+console invented is not in them; a figure that merely moved between ticks still is.
+
+The same class of bug appeared inside the console itself during the redesign. Merging the
+forecast and demand panels brought a per-fuel demand **sum** into scope — and the sum
+(2,041 L) was a number the backend had never sent. It was a legitimate derivation, but
+it was computed inline in a component rather than named in `lib/derive.ts`, so the
+invariant test caught it. The fix was the discipline the plan called for: add the
+derivation to `derive.ts` **and** to the allow-list. The test was working, not failing.
 
 ---
 
 ## 4. Real bugs found by running the thing
 
-Two bugs, both on our side, both only visible when the complete stack ran under the
-console's load:
+Five bugs, all on our side, all only visible when the complete stack ran under the
+console's load — or, in the case of the last three, when the console was rebuilt and
+re-verified from scratch:
 
 1. **The snapshot fetch demanded more connections than the pool had.** `_fetch_snapshot`
    fired 8 concurrent reads against a 15-connection pool where each read costs 2. Fixed
@@ -229,6 +296,37 @@ A third, smaller one: the async generator is abandoned rather than closed, so it
 `finally` never ran — **and** the semaphore was constructed at `__init__` time, before
 the event loop existed (`RuntimeError: no running event loop`). Both are now handled.
 
+### Two more, found by the console redesign
+
+The redesign was judged by the same rules as everything else, and it surfaced two more:
+
+3. **The container build was broken, and the local build hid it.** `live.test.tsx` read
+   `process.env.LIVE_BACKEND` with no Node types in scope. On a developer machine
+   `tsc -b` skipped the check behind a stale `tsconfig.tsbuildinfo`, so the file passed
+   locally — and the Docker build, which starts from a clean checkout, failed outright
+   with `TS2591: Cannot find name 'process'`. The bug had been in the tree since the
+   original commit. Fixed with a local `declare` for the one global the test needs, so
+   the browser bundle never depends on Node's type definitions.
+
+4. **The live invariant test was racing the simulator.** It snapshotted the endpoints
+   separately and *then* rendered. Because the world ticks between the two, every figure
+   that moved in between — the plan's `total_litres`, the tick number, a fill ratio — was
+   flagged as "invented" even though the console had rendered it verbatim from a live
+   backend response. Fixed by wrapping `fetch` and building the allow-list from the
+   responses the console actually received.
+
+A fifth, smaller one of the same family: the live test originally waited for the verdict
+badge to read `RECOMMENDED`, `CAUTION` or `BLOCKED`. The backend also emits
+`INFORMATIONAL` — and it does so whenever the plan is empty and no shipment is needed,
+which is a perfectly normal state for a healthy network. The test failed on a correct
+console. It now waits for the hero's **headline**, which the backend always sends once a
+plan exists, rather than for a verdict string that depends on the world's state.
+
+Neither is a race in the console. Both are the *same* mistake in a different place: a
+check that samples the world at a different moment than the code under test, and so
+reports a failure that is really a timing artefact. The lesson generalises — **a test
+must observe the same thing the code observed**, or it is measuring the clock.
+
 ### A note on the regression tests
 
 The first draft of the "subscription is closed" tests did not actually distinguish the fix
@@ -241,6 +339,88 @@ deterministic test.
 
 A test that cannot fail is worse than no test: it is a green light wired to nothing.
 
+### A sixth bug, found by injecting faults into a healthy system
+
+The simulator exposes two injection surfaces: **domain events** (break a route,
+dark a station, spike demand) and **API faults** (make the simulator slow,
+unavailable, or stale). Documenting both — and measuring what each one
+actually does rather than what its name suggests — turned up a bug that the
+49-check verifier does not cover and that no amount of unit testing would have.
+
+**`STATE_MAX_AGE` was 1 second against a `POLL_INTERVAL` of 5 seconds.**
+
+The backend refreshes its world snapshot every 5 seconds. `STATE_MAX_AGE`
+decides when the backend calls that snapshot *stale*, and the console renders
+a red **"Stale data"** banner when it is. With a 1-second threshold, the
+snapshot was flagged stale for four seconds out of every five — so the console
+showed a red staleness warning on a **perfectly healthy system, 80% of the
+time**.
+
+Sampling `/api/stream-health` ten times in a row confirmed it:
+
+```
+banner=True  is_stale True  age 2.96     banner=False  is_stale False  age 0.83
+banner=True  is_stale True  age 3.94     banner=True   is_stale True   age 1.78
+banner=True  is_stale True  age 4.90     banner=True   is_stale True   age 2.74
+```
+
+Fixed to `STATE_MAX_AGE = 15` — three poll intervals of slack. The rule is
+now written down in `docker-compose.yml` and `docs/BACKEND.md`:
+
+> **`STATE_MAX_AGE` must be greater than `POLL_INTERVAL`.** A snapshot can only
+> ever be as fresh as the poll that captured it.
+
+This is the same class of mistake as the tick-interval retune in §2.G, and it
+has the same shape: a threshold calibrated against one clock being applied to
+another. A threshold near the tick period reports a dropped stream that never
+happened; a threshold below the poll interval reports stale data that never
+was.
+
+There is a second reason it mattered. **A permanently visible warning is
+indistinguishable from a real one.** After a week of "Stale data" on a healthy
+stack, nobody looks up when it is true — so the freshness contract, which is
+the console's credibility claim, had quietly become noise.
+
+### What the injections actually do — four measured surprises
+
+Writing the guide meant measuring each injection rather than trusting the
+integration guide PDF, and four things did not match the obvious reading:
+
+1. **`start_tick` is inclusive of the *next* tick's pass.** Events start
+   before the tick counter increments, so an event injected while the world
+   already sits at tick N does **not** activate at tick N — it waits for tick
+   N+1. Inject `N-1` to have it live at tick N. Resolution has no such
+   off-by-one: the event reverses exactly when the world reaches `end_tick`.
+
+2. **Four of the six domain events raise no anomaly at all.** `station_outage`
+   and `depot_constraint` are *capacity* facts, not anomalies — the backend
+   enforces them at the gate (`optimizer.py` constraint C7, `validator.py`)
+   rather than flagging them. And `shipment_delay` / `supply_shortfall` only
+   surface as `SUPPLY_SHORTFALL` when a depot actually **runs dry** before its
+   resupply lands — a much narrower condition than the name suggests. The
+   honest assertions for these are behavioural, not anomaly-based.
+
+3. **`stream_disconnect` does not tear down a live stream.** It rejects *new*
+   connections with a 503 and leaves an established subscription running, so
+   the backend's watchdog correctly did **not** fire (`suspected_drops` stayed
+   at 0, because the tick advanced *and* events kept arriving). The fault is
+   only visible at the next reconnect attempt.
+
+4. **`latency` past 3 seconds is a timeout, not a slow response.** The
+   backend's per-request timeout is 3.0s, so `delay_ms: 3000` exercises a
+   different code path — and a different failure mode — than `delay_ms: 500`.
+
+The guide is `docs/TESTING.md`. It documents all six domain events, all five
+API faults, the timing semantics above, and a full end-to-end pass: break a
+route → confirm the anomaly, the incident and the KPI → take the upstream
+away → confirm the console degrades to polling and says so → let it recover on
+its own → run the live suite against the *injected* world.
+
+That last step is the strongest single check in the project: it renders the
+console against a broken world and verifies every number on screen still came
+from a backend response. **132 passed** against a world with a disrupted route
+and a station in outage.
+
 ---
 
 ## 5. Verification results
@@ -250,11 +430,16 @@ A test that cannot fail is worse than no test: it is a green light wired to noth
 | `client-verifier` — 49 checks across 6 groups | **49/49 PASSED** (regression gate) |
 | `backend` — full suite | **338 passed, 8 skipped** (up from 334 — 4 new broker tests) |
 | `backend` — `test_broker.py` alone | **19 passed** |
-| `frontend` — full suite | **116 passed, 3 skipped** (the 3 skips are the live tests without `LIVE_BACKEND`) |
+| `frontend` — full suite | **132 passed, 3 skipped** (the 3 skips are the live tests without `LIVE_BACKEND`) |
 | `frontend` — live suite against the running stack | **3/3 passed** |
+| `frontend` — Docker build (`npm run build` in-container) | **passed** — the container's `tsc` step type-checks from a clean checkout |
 | `docker compose ps` | **5 services, all healthy** |
 | Simulator pool under a 120 s window | **stable at 5 connections, zero exhaustion events** |
 | Live no-invented-numbers check | **passed** — no rendered number absent from the backend payloads |
+| Live no-invented-numbers check **against an injected world** | **passed** — 132 passed with a route disrupted and a station in outage |
+| Injection sweep — 6 domain events + 5 API faults | **all 11 measured** against the running container; every claim in `docs/TESTING.md` verified |
+| Freshness contract — healthy system | **silent** — `is_stale` false, no banner, across 10 samples |
+| Freshness contract — under `unavailable` fault | **loud** — `mode: polling`, `is_stale: true`, banner shown; recovers on its own |
 
 The live console check is run with:
 
@@ -274,13 +459,22 @@ LIVE_BACKEND=http://localhost:8002 npm test
 > "deselected". Always follow with
 > `docker compose up -d --force-recreate <service>`.
 
+> **The Docker build is the honest typecheck.** `npm run build` on a developer machine
+> can be masked by a leftover `tsconfig.tsbuildinfo` — and it was: a `process.env`
+> reference in the live test had been sitting in the tree since the original commit,
+> invisible locally, and it broke the container build outright. The fix is a local
+> `declare` for the one global the test needs, so the browser bundle never depends on
+> Node's type definitions. `rm -f frontend/tsconfig.tsbuildinfo` before a local build
+> if you want the same view the container gets.
+
 ---
 
 ## 6. Documentation
 
 | Document | Contents |
 | :--- | :--- |
-| `docs/DASHBOARD.md` | The console end to end: the one rule and the three-layer split, proxy-not-CORS, SSE-is-advisory, every panel and its backend source, the two-click dispatch, the test suite, degradation behaviour, and what is deliberately absent |
+| `docs/TESTING.md` | Testing by injection: the six domain events and five API faults, what each one *actually* does (measured, not assumed), the `start_tick` off-by-one, which events raise an anomaly and which do not, why `stream_disconnect` does not drop a live stream, the freshness-threshold rule, and a full end-to-end pass |
+| `docs/DASHBOARD.md` | The console end to end: the one rule and the three-layer split, proxy-not-CORS, SSE-is-advisory, the redesigned screen and its three layers, the theme, every panel and its backend source, the two-click dispatch, the test suite, degradation behaviour, and what is deliberately absent |
 | `docs/BACKEND.md` | Part I: API contract, validator rules, measured simulator semantics, broker design. Part II: the optimiser, forecast, anomalies, explanation, optional LLM. **§18: the connection-pool incident** — evidence, both causes, the fixes, the regression tests, and what was *not* changed |
 | `README.md` | Runbook for all **five** services, design notes, troubleshooting (including simulator-pool exhaustion, console "Upstream unreachable", console live-test timeout) |
 | `frontend/src/lib/derive.ts` | The pure derivations — the only place a number may be born |
@@ -302,7 +496,8 @@ LIVE_BACKEND=http://localhost:8002 npm test
 | Anomaly detection | ✅ Complete — six detectors + bounded observation log |
 | Anomaly-to-explanation layer | ✅ Complete — deterministic and auditable; LLM isolated and off |
 | **Operator dashboard frontend** | ✅ **Complete — 5th service, live-verified, no-invented-numbers enforced** |
-| **End-to-end verification + documentation** | ✅ **Complete — 49/49, 338 backend, 116 frontend** |
+| **Console redesign** | ✅ **Complete — one column, one hero, one panel at a time; light + dark theme** |
+| **End-to-end verification + documentation** | ✅ **Complete — 49/49, 338 backend, 132 frontend** |
 | Observability (Prometheus / Grafana) & load testing | ⬜ Not started |
 
 ---
