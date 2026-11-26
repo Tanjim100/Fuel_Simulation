@@ -171,6 +171,51 @@ incident into an **executable invariant**. See
 
 ---
 
+## 2.5 The requirements, traced to what was built
+
+The first thing this project did — before writing a line of code — was read the
+brief and write down the requirements as a **separate analysis**
+(`docs/system_understanding_and_requirements.md`). That document is the
+contract: the domain model, the simulator's integration rules, the functional
+and technical requirements, the full catalogue of post-build operational
+problems, and the evaluation breakdown.
+
+It is kept in the repo because the implementation was built *against* it, and
+a judge can check any claim by walking the same path. Every requirement has
+an answer somewhere in this codebase:
+
+| Requirement (from the analysis) | Where it is answered |
+| :--- | :--- |
+| **Dashboard** — live depot/station inventories, route status, supply schedule, shortage alerts, stockout timeline, system health | The console's four tabs — Network, Forecast, Problems, System — [§4.6](#46-the-console-one-column-three-tiers) |
+| **Inspectable decisions** — every recommendation explains its why, with human-in-the-loop approval | The ActionCard + Details disclosure, two-click dispatch — [§4.3](#43-the-decision-path-the-gate) |
+| **Prediction** — demand forecast with hour-of-day and `demand_multiplier`; stockout probability | The backend re-implements the simulator's demand formula *exactly* — [§2 Trap 1](#trap-1-the-world-is-stochastic-so-the-forecast-is-an-estimate) |
+| **Detection** — demand spikes, inventory drops, route/depot bottlenecks | Seven anomaly kinds, each with a measured threshold, counted once per finding — [§5.3](#53-anomaly-detection-seven-kinds-counted-once) |
+| **Decision intelligence** — constrained optimisation honouring route, depot, inventory and station limits; split large shipments; reroute when disrupted | A greedy solver that is always feasible, with an optional LP path that is adopted only when it scores better — [§5.4](#54-optimisation-greedy-by-default-lp-when-it-helps) |
+| **Reproducible deployment** — one command, health checks, restart policies | `docker compose up -d` → 5 healthy services — [§6.1](#61-quick-start) |
+| **Observability** — request rate, p95, error rate, CPU/memory, fallback activations, structured logs | 22 required metric families across the four PDF layers — [§5.12](#512-observability-three-layers-by-metrics-one-by-logs) |
+| **Load testing** — throughput and p50/p95/p99 under concurrency | Three measured runs, tied to pool saturation — [§6.9](#69-load-testing) |
+| **API faults** — `unavailable`, `latency`, `error_rate`, `stale_data`, `stream_disconnect` | Backoff + circuit breaker + degraded mode — [§5.6](#56-resilience-the-circuit-breaker) |
+| **Domain crises** — demand spike, route disruption, depot constraint, shipment delay, supply shortfall, station outage | Anomaly detection, rerouting, priority allocation — [§6.11](#611-testing-by-injection-the-simulators-fault-switches) |
+| **Allocation errors** — `409`/`422` on capacity overflow, duplicate retries, invalid cancellation | A pre-flight validator that mirrors the simulator's *ordered* rejection reasons, and idempotency keys persisted before the write — [§2 Trap 2](#trap-2-the-simulator-rejects-writes-and-its-rejection-reasons-are-ordered) |
+| **Malformed payloads** — validate strictly; quarantine rather than crash | Pydantic schemas + a bounded dead-letter queue with replay — [§9](#9-the-api-surface) |
+| **Bounded history** — never query `/v1/demand-history` without a limit | `limit` is mandatory in every call, and `STATE_MAX_AGE` bounds the snapshot |
+
+### The catalogue is the point
+
+The analysis does not stop at "build a dashboard". §5 of that document
+enumerates **every** way the platform can fail once it is running — simulator
+outages, latency, stale headers, SSE disconnects, malformed payloads, demand
+spikes, route disruptions, depot constraints, station outages, capacity
+overflows, duplicate dispatches, model crashes, traffic spikes, unbounded
+history, container crashes — and proposes a solution for each.
+
+That catalogue is the reason this platform has a circuit breaker, a dead-letter
+queue, a validator with a differential oracle, a count-once metric tracker, and
+a load-test report. **Each mechanism answers a named row.** The Resilience
+section below is that catalogue, implemented.
+
+---
+
 ## 3. The stack
 
 ### 3.1 Services and runtime
@@ -906,6 +951,70 @@ gave the same shape — W1 saturation 1.00 / mean 0.64, W2 and W3 at 0.00 —
 with W1's p50 at 202 ms. The numbers move with the machine; the *shape* does
 not. That is the point of the report.
 
+### 6.11 Testing by injection — the simulator's fault switches
+
+The simulator exposes an **admin API** that lets you break the world on
+purpose. This is how the platform's resilience is actually *demonstrated*
+rather than asserted, and `docs/TESTING.md` is the full guide (614 lines,
+with every command and its expected output).
+
+**The controls** — a pristine world, and the clock:
+
+```bash
+curl -sX POST http://localhost:8000/admin/reset        # tick 0, PAUSED, seed 12345
+curl -sX POST http://localhost:8000/admin/step         # advance exactly one tick
+curl -sX POST http://localhost:8000/admin/run          # start the background ticker
+curl -sX POST http://localhost:8000/admin/pause         # stop it
+curl -s  "http://localhost:8000/admin/audit?limit=20"  # every event, tick and allocation
+```
+
+**The domain events** — `POST /admin/events`:
+
+```bash
+curl -sX POST http://localhost:8000/admin/events \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"route_disruption","route_id":"route-patiya-coxsbazar"}'
+```
+
+**The API faults** — `POST /admin/faults`:
+
+```bash
+curl -sX POST http://localhost:8000/admin/faults \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"unavailable","duration_seconds":30}'
+
+curl -sX POST http://localhost:8000/admin/faults/clear
+```
+
+**What each injection should look like, on all three surfaces.** This is the
+table `docs/TESTING.md` §5 gives, and it is the one worth memorising — it
+says what the simulator does, what the backend does, and what the *console*
+does:
+
+| Injection | Simulator | Backend | Console |
+| :--- | :--- | :--- | :--- |
+| `route_disruption` | route → `DISRUPTED` | `ROUTE_BOTTLENECK` anomaly + incident | StatusBar "Disrupted 1"; Problems tab |
+| `station_outage` | station → `OUTAGE` | *no anomaly*; allocations → `409 STATION_CLOSED` | Network tab: the station's dot turns red |
+| `depot_constraint` | depot → `CONSTRAINED` | *no anomaly*; depot still dispatchable | Network tab: the depot's dot turns amber |
+| `demand_spike` | `demand_multiplier` × multiplier | `DEMAND_SPIKE` anomaly; forecast ×multiplier | Forecast tab |
+| `shipment_delay` | supply `planned_tick` += delay, `DELAYED` | *no anomaly*; resupply arrives later | Forecast tab (indirectly) |
+| `supply_shortfall` | supply `quantity` × factor | *no anomaly*; depot holds less | Forecast tab (indirectly) |
+| `unavailable` | `503` on `/v1/*` | `mode: polling`, `is_stale: true` | "Upstream unreachable", mode "polling" |
+| `latency` | every request delayed | timeouts above 3 s | panels slow, then error |
+| `error_rate` | random `503`s | partial failures retried | intermittent, still correct |
+| `stale_data` | `X-Simulator-Stale: true` | Redis cache flushed; snapshot re-fetched | no banner (the backend is honest) |
+| `stream_disconnect` | new `/v1/stream` → `503` | reconnect blocked | no visible change until reconnect |
+
+**Read the second column before the third.** The rows marked *no anomaly* are
+the interesting ones: a station outage is *not* an anomaly — it is a
+**constraint**, and the correct response is to refuse the allocation with
+`409 STATION_CLOSED` rather than to raise a spurious alert. A console that
+raised an alarm for every outage would be a console nobody trusts.
+
+`docs/TESTING.md` §4 walks a full end-to-end pass — reset the world, break a
+route that has no alternative, run the world, wait one tick, and look at what
+the system *thinks* and what the console *shows*.
+
 ---
 
 ## 7. How it is verified
@@ -1129,9 +1238,11 @@ verifier's own.
 | `docs/RESILIENCE.md` | The breaker's state machine, the degraded-mode contract, the measured recovery timeline. |
 | `docs/LOAD_TEST.md` | The workload definition, the report schema, the measured results. |
 | `docs/SCENARIO.md` | The scenario schema and how to derive a new one. |
-| `docs/DEMO.md` | The 14-beat demo narrative. |
+| `docs/DEMO.md` | The 14-beat demo narrative, with the exact commands for each beat. |
+| `docs/TESTING.md` | Testing by injection — the admin controls, the six domain events, the five API faults, and what each surface should show for every injection. |
 | `docs/SYSTEM_DESIGN.md` | The as-built design (rewritten to match the running product). |
 | `docs/BRIEF.md` | What the brief asked for, what is implemented, and what is not — and why. |
+| `docs/system_understanding_and_requirements.md` | The Day-1 requirements analysis: the domain model, the simulator's integration rules, the functional and technical requirements, the operational problems, and the evaluation breakdown. |
 | `docs/PROMPT_JOURNAL.md` | The prompt sequence that built this system, step by step — and what each prompt actually bought. |
 | `regular_updates/Day_1.md` … `Day_6.md` | The build log, including the bugs found and the measured results. |
 
