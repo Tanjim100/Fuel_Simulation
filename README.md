@@ -1132,6 +1132,7 @@ verifier's own.
 | `docs/DEMO.md` | The 14-beat demo narrative. |
 | `docs/SYSTEM_DESIGN.md` | The as-built design (rewritten to match the running product). |
 | `docs/BRIEF.md` | What the brief asked for, what is implemented, and what is not — and why. |
+| `docs/PROMPT_JOURNAL.md` | The prompt sequence that built this system, step by step — and what each prompt actually bought. |
 | `regular_updates/Day_1.md` … `Day_6.md` | The build log, including the bugs found and the measured results. |
 
 ---
