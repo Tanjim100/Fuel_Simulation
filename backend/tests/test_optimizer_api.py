@@ -376,3 +376,40 @@ def test_the_solver_endpoint_is_truthful(app_client):
         assert body["active"] == "greedy"
         assert "greedy" in body["note"].lower()
     assert body["horizon_ticks"] == 16
+
+
+# --------------------------------------------------------------------------- #
+# The decisions counter -- both dispatch paths must move it
+# --------------------------------------------------------------------------- #
+def test_the_execute_path_counts_the_dispatch(app_client):
+    """A dispatch made from the console must be counted.
+
+    The console's ActionCard calls ``POST /api/optimize/execute`` -- *this*
+    endpoint -- not ``POST /api/allocations``. Both paths write to the
+    simulator, and both share ``execute_shipments``, but only the
+    allocations router incremented ``backend_decisions_total``. So a
+    dispatch made from the console moved real fuel while the decision
+    counter stayed at zero: the PDF's section 15 "decision frequency"
+    under-reported exactly the decisions an operator cares about.
+    """
+    from app.metrics import DECISIONS
+
+    before = DECISIONS.value(kind="dispatch")
+    body = app_client.post("/api/optimize/execute", json={}).json()
+
+    created = len(body["created"])
+    if not created:
+        pytest.skip("the optimiser produced no shipment to execute")
+
+    # The counter measures *shipments*, not requests: it must rise by the
+    # number of shipments that actually went out.
+    assert DECISIONS.value(kind="dispatch") == before + created
+
+
+def test_a_read_only_optimize_does_not_count_a_dispatch(app_client):
+    """``POST /api/optimize`` writes nothing, so it must count no dispatch."""
+    from app.metrics import DECISIONS
+
+    before = DECISIONS.value(kind="dispatch")
+    app_client.post("/api/optimize", json={})
+    assert DECISIONS.value(kind="dispatch") == before

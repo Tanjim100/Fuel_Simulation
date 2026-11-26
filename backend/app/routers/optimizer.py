@@ -28,6 +28,7 @@ from ..circuit_breaker import CircuitOpen
 from ..dispatch import gate_plan
 from ..explain import explain_plan
 from ..forecast import FUEL_TYPES, build_forecast
+from ..metrics import DECISIONS
 from ..models import OptimizeExecuteResponse, OptimizeRequest, OptimizeResponse
 from ..optimizer import OptimizationResult, OptimizerConfig, optimize
 from ..state import WorldSnapshot
@@ -273,6 +274,18 @@ async def execute_optimization(
     journal = getattr(request.app.state, "journal", None)
 
     outcome = await execute_shipments(client, journal, executable)
+
+    # The decision frequency the PDF's section 15 intelligence layer asks
+    # for. Counted *after* the write, and only for shipments that actually
+    # went out -- so the counter measures shipments, not requests, exactly
+    # as the allocations router counts it.
+    #
+    # This path and ``POST /api/allocations`` share ``execute_shipments`` but
+    # not this counter: without it, a dispatch made from the console's
+    # ActionCard -- which calls *this* endpoint -- left the counter at zero
+    # while the fuel was genuinely moving.
+    if outcome.created:
+        DECISIONS.inc(float(len(outcome.created)), kind="dispatch")
 
     # The world changed -- pull a fresh snapshot so the next plan sees it.
     # The shipments are already sent at this point, so a rejected refresh
