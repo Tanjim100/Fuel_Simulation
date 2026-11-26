@@ -122,6 +122,75 @@ decision path saturates the pool and takes ~200 ms at p50 in both runs; the
 read paths stay at single-digit milliseconds and never touch the pool. That
 invariance is the finding — not any single figure.
 
+### A third run, and what it corrected
+
+A third run (`loadtest/results/20261126T035832Z.json` — 30 s, 10 VUs, the
+same command) produced the *same shape* on the latency side but a **different
+saturation picture**:
+
+| | **W1** — decision | **W2** — dashboard | **W3** — console mix |
+| :--- | ---: | ---: | ---: |
+| Requests | 779 | 4,781 | 4,895 |
+| **Error rate** | **0.0%** | **0.0%** | **0.0%** |
+| **p50** | 316.9 ms | 5.4 ms | 5.6 ms |
+| **p95** | 486.6 ms | 24.4 ms | 15.7 ms |
+| **p99** | 540.4 ms | 38.1 ms | 25.3 ms |
+| **Throughput** | 25.6 req/s | 159.2 req/s | 152.7 req/s |
+| **Saturation peak** | **1.00** | **1.00** | 0.00 |
+| Saturation mean | 0.68 | 0.57 | 0.00 |
+
+**W2's saturation peak is 1.00 here, against 0.25 and 0.00 in the two earlier
+runs.** The read path's *latency* barely moved — 5.4 ms at p50, in line with
+the other runs — so this is not the console's polling becoming slow.
+
+Two things drive the gauge, and both are worth naming precisely.
+
+**The gauge is about the backend's refresh, not about the console's
+requests.** `backend_simulator_inflight_reads` counts reads in flight against
+the simulator — the broker's snapshot refresh (`backend/app/broker.py`) — and
+`backend_simulator_pool_saturation_ratio` is that count over the bound the
+backend sets. The console's own requests mostly do not reach the simulator:
+a read serves the cached snapshot, and only *triggers* a refresh when the
+snapshot has aged past `STATE_MAX_AGE` (15 s, against a `POLL_INTERVAL` of 5
+s).
+
+**Measured, not assumed.** Counting the simulator's `/v1/stations` requests
+in the backend's log:
+
+| Condition | Reads in 30 s |
+| :--- | ---: |
+| Idle — background poller only | 5 |
+| 60 console polls of `/api/stations` | 7 |
+
+Sixty polls added **two** reads — the `STATE_MAX_AGE` refreshes — while the
+background poller accounts for the rest. The console's read path is served
+from cache, which is the whole point of the cached-snapshot design.
+
+**W2 also inherited the tail of W1.** W1's decision path puts four reads in
+flight against a limit of four. W1 ends, and the sampler — started and
+stopped per scenario — catches that backlog for a moment into W2. W1's
+saturation mean was 0.68, W2's 0.57, and W3's 0.00: a monotonic decay
+consistent with a backlog draining.
+
+So W2's 1.00 peak is the **union of two real but small effects** — W1's
+drainage and W2's own occasional refresh — against a *latency* that barely
+moved. That is a **measurement artefact, not a finding about the read path**,
+and the honest way to report it is to say so rather than to quietly discard
+the outlier run. Three things follow:
+
+1. **The W3 figure is the clean one** — 0.00 peak, 0.00 mean, in all three
+   runs. W3 is the console's *steady state*, and by then the backlog from
+   W1 has fully drained, so no refresh saturates the pool.
+2. **The invariant that holds across all three runs** is the latency one:
+   the decision path is ~50× slower than the read paths, and it is the only
+   one that saturates the pool *on its own account*.
+3. **The gauge answers "is the backend's demand on the simulator high?", not
+   "is the console slow?".** A reader comparing runs should compare the
+   *decision* path's peak against the *console mix*'s peak — the comparison
+   that the console's actual polling behaviour implies.
+
+The report is the evidence; it is not rewritten to look tidier.
+
 ---
 
 ## What the numbers say
@@ -176,6 +245,7 @@ every label set rather than reading an empty one. (It was **0.0** before the
   "schema_version": 1,
   "tool": "python-harness",
   "started_at": "2026-11-25T19:38:52.328150+00:00",
+  "ended_at": "2026-11-25T19:40:31.104882+00:00",
   "duration_seconds": 30.0,
   "vus": 12,
   "concurrency": 12,

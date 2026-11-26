@@ -915,7 +915,7 @@ not. That is the point of the report.
 | Gate | What it proves | Current |
 | :--- | :--- | :---: |
 | `verifier/verify_simulator.py` | The platform honours the simulator's contract — 49 checks across 6 groups | **49/49** |
-| `backend/tests/` | 25 files, 10,082 lines, including **two differential oracles against the live simulator** | **468 passed, 8 skipped** |
+| `backend/tests/` | 26 files, 10,119 lines, including **two differential oracles against the live simulator** | **470 passed, 8 skipped** |
 | `frontend/src/test/` | 9 files, 2,127 lines, including the no-invented-numbers guarantee | **136 passed, 3 skipped** |
 
 **The verifier's 49 checks, by group:**
@@ -955,9 +955,9 @@ known set.
 
 ### 7.4 The bugs this found
 
-Verification here is not ceremony. Nineteen defects were found by three
-independent fresh-eyes audits — each was a **green stack with something quietly
-wrong**. A sample:
+Verification here is not ceremony. Twenty-one defects were found — nineteen by
+three independent fresh-eyes audits, and two more by wiring up CI. Each was a
+**green stack with something quietly wrong**. A sample:
 
 | Bug | What was wrong |
 | :--- | :--- |
@@ -967,8 +967,49 @@ wrong**. A sample:
 | `backend_upstream_retries_total` rendered as a permanent zero | The client retries *below* the breaker's choke point, so the backend cannot see a retry — the metric was unmeasurable |
 | `backend_incidents_total` rendered with no sample lines | Never registered |
 | A rejected plan always answered 409 | An unknown station is 404 and a malformed request is 422 |
+| The console's Dispatch button moved fuel while the dispatch counter stayed at zero | Two dispatch paths existed; only one of them counted |
+| The verifier suite could not run on a clean machine | `docker compose exec` needs `client-verifier` running, and `ensure_stack` never started it |
 
-Full list: `regular_updates/Day_6.md` §3.
+Full list: `regular_updates/Day_6.md` §3 and §10.
+
+### 7.5 Continuous integration
+
+`.github/workflows/ci.yml` runs the whole verification story on every push to
+`main` and on every pull request:
+
+```yaml
+- name: Run the verification suite
+  run: ./scripts/verify-all.sh --json verify.json --skip-load-test   # PRs
+  run: ./scripts/verify-all.sh --json verify.json --with-load-test \
+         --load-duration 30 --load-vus 10                              # main
+```
+
+It runs **the same command a human runs**, rather than a second implementation
+of the checks — a re-implementation is a second thing that can be wrong. The
+script's exit code is the gate (0 only when every suite passed), and the JSON
+report is uploaded as an artifact either way, so a red run still leaves the
+evidence behind.
+
+| Trigger | Suites | Wall clock (measured locally) |
+| :--- | :--- | :---: |
+| Pull request | verifier, backend, frontend, observability | 145 s |
+| Push to `main` | + the load test | 253 s |
+
+The load test is off on pull requests because it deliberately puts the backend
+under real load — it is a signal about the mainline, not a gate on every
+draft.
+
+**A cold runner takes longer** — the `npm ci` and `pip install` layers have
+to be built from scratch. The job's timeout is set to 45 minutes so a slow
+network cannot turn a passing build into a failure.
+
+**One thing worth knowing if a CI run is inexplicably slow:** the bottleneck
+is almost always **disk, not code**. On the development machine, a run took
+1,143 s instead of 253 s — and the backend's own logs showed a 912-second
+silence, which proved the time was not spent in the backend at all. The
+machine's disk was at 98% with 3 GB of Docker build cache. The workflow
+therefore prunes stale images before building and reports the disk state
+afterwards, so the next slow run is diagnosable rather than mysterious.
 
 ---
 

@@ -89,7 +89,11 @@ compose() { "${COMPOSE[@]}" "$@"; }
 
 ensure_stack() {
   head2 "Bringing the stack up"
-  if ! compose up -d --build simulator-api redis backend frontend >/tmp/verify-all-compose.log 2>&1; then
+  # ALL FIVE services. The verifier suite runs
+  # `docker compose exec -T client-verifier ...`, so `client-verifier` must be
+  # running -- `exec` refuses a stopped container. It depends only on
+  # `simulator-api` and `redis`, so naming it explicitly is enough.
+  if ! compose up -d --build simulator-api redis backend frontend client-verifier >/tmp/verify-all-compose.log 2>&1; then
     note "compose log: /tmp/verify-all-compose.log"
     return 1
   fi

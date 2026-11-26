@@ -1391,3 +1391,4 @@ thousands of litres and looks perfectly plausible.
 | `scripts/demo-normal.sh` | Beats 1–8 of the demo. |
 | `scripts/demo-crisis-fault-recovery.sh` | Beats 9–14, including the fault injection and the observed breaker transition. |
 | `loadtest/run.sh` | The load test. Picks k6 if installed, the Python harness otherwise. Both emit the same JSON schema. |
+| `.github/workflows/ci.yml` | The CI workflow. Runs `scripts/verify-all.sh` — the same command a human runs — on every push to `main` and every pull request, and uploads the JSON report as an artifact. The load test is included on `main` and skipped on pull requests, because it deliberately puts the backend under load. |

@@ -739,6 +739,11 @@ change.
 exactly five names, and after stopping the overlay, exactly five containers
 are running.
 
+> **Later note.** The backend figure above (468) is the count as of that run.
+> Two more backend tests were added afterwards — the pair guarding the dispatch
+> counter — so the current count is **470 passed, 8 skipped**. The gates are
+> unchanged; only the count moved.
+
 ---
 
 ## 5. The documentation
@@ -845,6 +850,7 @@ demo.
 | **DLQ + graceful recovery** | ✅ **Complete — a bad frame is quarantined, not raised** |
 | **Scenario configuration (no hardcoded values)** | ✅ **Complete — YAML, validated at boot, oracle proves 0 numbers changed** |
 | **Harness entry point (deterministic JSON)** | ✅ **Complete — `./scripts/verify-all.sh --json out.json`** |
+| **CI workflow (PDF §21)** | ✅ **Complete — `.github/workflows/ci.yml`, runs the same harness on every push and PR** |
 | **Architecture diagram (PDF §20 item 6)** | ✅ **Complete — `docs/ARCHITECTURE.md`** |
 | **Demo narrative (PDF §20 item 11)** | ✅ **Complete — 14 beats, two repeatable scripts** |
 
@@ -856,9 +862,10 @@ demo.
 
 ### Priority 1 — Submission hardening
 
-* **A CI workflow** that runs `verify-all.sh` on every push. The suites are
-  already CI-shaped — the verifier exits `0`/`1`, `verify-all.sh` emits one
-  JSON object — but nothing runs them automatically yet.
+* ~~**A CI workflow** that runs `verify-all.sh` on every push.~~ **Done** —
+  `.github/workflows/ci.yml` runs the same harness a human runs, on every push
+  to `main` and every pull request, and uploads the JSON report as an artifact.
+  See §10 below.
 * **A recorded demo.** The 14-beat script is repeatable, which is most of the
   way there; a video is the remaining mile.
 * **A final read-through of every document** against the running product, by
@@ -890,18 +897,18 @@ demo.
 ## 9. Immediate Next Steps
 
 1. Rebuild and recreate both changed images (`backend`, `frontend`) and
-   re-run the full gate — 49/49, 468 backend, 136 frontend, 5 healthy.
+   re-run the full gate — 49/49, 470 backend, 136 frontend, 5 healthy.
 2. Run `./scripts/verify-all.sh --json` and commit the report as the
    submission's machine-readable evidence.
 3. A fresh-eyes read of `docs/` against the running product, then the
    submission commit.
-
 > **Note:** the 49-check harness, the validator oracle, the optimiser oracle,
 > the forecast oracle and the console's no-invented-numbers test are reusable
 > as a **regression suite** for every subsequent change — run all of them
 > after each commit to guarantee no integration contract has been broken.
-> Today they caught **nineteen** real bugs (Bug 7 through Bug 25 in §3), plus
-> the `SYSTEM_DESIGN.md` drift that a fresh reader found.
+> Today they caught **twenty-one** real bugs: nineteen in §3 (Bugs 7 through
+> 25), plus Bug 26 in §10.2 — the verifier suite could not run on a clean
+> machine — and Bug 27 in §10.4, the dispatch counter that did not count.
 >
 > Three of the nineteen (Bugs 12, 13 and 14) were found by *the harness itself*,
 > which is the strongest argument for building one: the stranded coroutine
@@ -917,3 +924,166 @@ demo.
 > found by running the tests, because the tests encoded the same wrong
 > behaviour. **That is the argument for reading the code against the
 > product, not just for writing more tests.**
+
+---
+
+## 10. Continuous integration, and one more silent bug
+
+### 10.1 The CI workflow
+
+`.github/workflows/ci.yml` runs the verification story on every push to `main`
+and every pull request.
+
+The design decision that matters: **it runs the same command a human runs.**
+It does not re-implement the checks, because a second implementation of the
+checks is a second thing that can be wrong. `./scripts/verify-all.sh` already
+exits `0` only when every suite passed and already emits one JSON object, so
+the script's exit code *is* the gate and no re-parsing is needed.
+
+| Trigger | Suites | Measured wall clock |
+| :--- | :--- | :---: |
+| Pull request | verifier, backend, frontend, observability | 145 s |
+| Push to `main` | + the load test | 253 s |
+
+Both figures are real local runs of the exact commands the workflow issues,
+against the same five-service stack.
+
+**The load test is off on pull requests.** It deliberately puts the backend
+under real load, so it is a signal about the mainline rather than a gate on
+every draft — but it *is* on for `main`, because the PDF's §18 evidence should
+be regenerated from the code that actually landed.
+
+The report is uploaded as an artifact **either way**, so a red run still leaves
+the evidence behind. That matters: a CI job that only preserves output on
+success has thrown away exactly the thing you wanted it for.
+
+**Deployment was deliberately left out.** PDF §21 lists CI/CD together, but
+CD implies a registry, a version tag and a rollback target — infrastructure
+that must be *somewhere*, and for this project there is no production to
+deploy to. A tag on the commit is the honest form of "deployment versioning"
+until there is a real environment. §7's Priority 2 tracks it.
+
+### 10.2 Bug 26 — The verifier could not run on a clean machine
+
+The workflow could not have worked on its first attempt, and the reason was
+not visible until the stack was torn down and rebuilt from nothing.
+
+`verify-all.sh`'s `ensure_stack` started **four** services:
+
+```bash
+compose up -d --build simulator-api redis backend frontend
+```
+
+But the verifier suite runs
+`docker compose exec -T client-verifier python verify_simulator.py`, and
+`docker compose exec` **refuses a container that is not running**. The
+`client-verifier` service was therefore missing from the command — and the
+suite worked locally only by accident, because a previous
+`docker compose up -d` (which starts all five) had left it running.
+
+On a clean CI runner the verifier suite would have failed with
+`service "client-verifier" is not running`.
+
+The fix is one word in that command. `client-verifier` depends only on
+`simulator-api` and `redis`, so naming it explicitly is enough:
+
+```bash
+compose up -d --build simulator-api redis backend frontend client-verifier
+```
+
+**The lesson is about how the bug stayed invisible.** The script had been run
+many times, always green, always on a machine where the container happened
+to be up. Nothing in the script asserted its own preconditions. The fix was
+verified from a state where `client-verifier` was genuinely absent — and then
+from a state where *every* container had been torn down, which is exactly
+what a CI runner looks like. Both passed.
+
+### 10.3 The slow-run investigation — disk, not code
+
+One full run took **1,143 s** instead of the expected 253 s. That is a
+15-minute mystery, and it is worth recording *how* it was diagnosed,
+because the first three explanations were wrong.
+
+| Hypothesis | Verdict |
+| :--- | :--- |
+| The load test hangs | ✗ Each scenario measured ~30 s; the harness is bounded by `duration + 60`. |
+| A cold Docker build | ✗ The compose log showed every layer `CACHED`. |
+| The backend is slow | ✗ The backend's own logs showed a **912-second silence** — it was idle. |
+
+A 912-second silence in the backend's logs means the time was not spent
+*in* the backend at all. The next check was the disk:
+
+```
+/System/Volumes/Data   228Gi  194Gi  4.4Gi  98%
+docker system df        Build Cache  3.022GB
+```
+
+The machine's disk was at **98%** with 3 GB of Docker build cache. Docker
+Desktop's virtual disk was nearly exhausted, so image export and unpack
+operations thrashed — turning a five-second build into a fifteen-minute
+stall, and producing **no error at all**. That last part is what makes it
+worth writing down: a full disk does not fail the build, it *delays* it.
+
+After clearing the stale images, `docker compose up -d --build` took **5.7
+seconds** again and the full run took 253 s.
+
+Two things changed as a result:
+
+1. **The CI workflow prunes stale images before building**, and reports the
+   disk state afterwards — so the next slow run is diagnosable rather than
+   mysterious.
+2. **`loadtest/harness.py` now stamps `started_at` before the scenarios run
+   and adds `ended_at`.** The old code set `started_at` *after* the run
+   finished, so a 90-second load test reported a start time equal to its end
+   time. That field is exactly what made the original investigation
+   confusing. The k6 merge path had the same flaw and the same fix — both
+   tools still emit one identical schema.
+
+The general lesson: **when a duration is measured, the timestamp that
+records it is worth auditing too.** A field that is wrong cannot mislead you
+if you never read it; it can mislead you completely if you do.
+
+### 10.4 Bug 27 — The console's dispatch button moved fuel without counting it
+
+Found by asking a question that sounds trivial and is not: *"does the dispatch
+button work?"*
+
+The console's ActionCard calls `POST /api/optimize/execute`. That path
+dispatched real shipments — fuel genuinely moved — but it **never incremented
+`backend_decisions_total{kind="dispatch"}`**. The counter sat at zero while
+the platform was doing the one thing the metric exists to measure.
+
+The cause is structural, not a typo: there are **two** dispatch paths.
+
+| Path | Counted? |
+| :--- | :--- |
+| `POST /api/allocations` → `routers/allocations.py` | ✅ yes, and always did |
+| `POST /api/optimize/execute` → `routers/optimizer.py` | ❌ **no** |
+
+Both call the same `execute_shipments` helper, but only one of them counted.
+The second one was added later, and the counter was not carried across.
+
+The fix is four lines in `routers/optimizer.py`, counting **after** the write
+and only for shipments that actually went out:
+
+```python
+if outcome.created:
+    DECISIONS.inc(float(len(outcome.created)), kind="dispatch")
+```
+
+Note `float(len(...))` as the *first positional argument* and `kind=` as the
+keyword. `Counter.inc(amount=1.0, **labels)` — a `count=` keyword would have
+become a **label**, not an amount. That is a trap worth writing down.
+
+**The regression test was proved to catch it.** The two new tests were run
+against the *unfixed* code first: the first FAILED and the second PASSED —
+which is exactly right, because the unfixed code dispatched without counting
+(it failed the count assertion) and a read-only optimise correctly did not
+count (it passed). The fix was then restored and both passed.
+
+This is the same shape as the earlier bugs: **a green stack with
+something quietly wrong.** The test suite passed before the fix and after it;
+only the metric told the truth. And it is precisely the kind of defect the CI
+workflow now guards against — once a counter is asserted by a test, it cannot
+silently stop counting again.
+

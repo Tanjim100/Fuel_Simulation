@@ -1,0 +1,155 @@
+# CI -- the platform proves itself on every push.
+#
+# The whole verification story already exists as one command:
+# `./scripts/verify-all.sh`. It runs the simulator verifier, the backend
+# suite, the frontend suite and the observability self-check, and writes a
+# single JSON report. This workflow runs exactly that -- it does not
+# reimplement the checks, because a second implementation of the checks is
+# a second thing that can be wrong.
+#
+# PDF section 13 asks for "Source Code -> Build -> Test -> Package ->
+# Deploy -> Health Check -> Running Application" and section 21 lists CI/CD
+# among the recommended deliverables. This file is the "Build -> Test ->
+# Health Check" half, executed automatically on every push.
+#
+# Design notes that are deliberate:
+#
+#   * The load test is OFF on pull requests and ON on pushes to main. It
+#     deliberately puts the backend under load, so it is a signal about the
+#     mainline, not a gate on every draft.
+#   * `verify-all.sh` exits 0 only when every suite passed, so the job's
+#     exit code IS the gate. No re-parsing of the JSON is needed.
+#   * The JSON report is uploaded as an artifact either way, so a failed
+#     run still leaves the evidence behind.
+#   * The simulator image is amd64. GitHub's hosted runners are amd64, so
+#     this runs natively; on an arm64 runner it would be emulated and
+#     slow. The job pins `ubuntu-latest` for that reason.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to the same branch supersedes the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The verifier's summary line is the pass signal for the PR title.
+  DOCKER_BUILDKIT: "1"
+
+jobs:
+  verify:
+    name: Verify the whole platform
+    runs-on: ubuntu-latest
+    # Measured on a 2026 MacBook Air: 253 s with the images already built,
+    # and considerably longer from a cold cache (the `npm ci` and `pip
+    # install` layers are the bulk of it). A GitHub runner is slower than
+    # this machine and its network is not guaranteed, so the ceiling is set
+    # generously rather than tightly -- a job killed by its own timeout
+    # reports as a failure that is really a lack of patience.
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Show the environment
+        run: |
+          echo "runner:  ${{ runner.os }} / ${{ runner.arch }}"
+          echo "python:  $(python3 --version)"
+          echo "docker:  $(docker --version)"
+          echo "compose: $(docker compose version)"
+
+      - name: Pull the simulator image
+        # Pulled explicitly so the ~1 GB download is not charged to the
+        # first `docker compose up` inside the verification script.
+        run: docker compose pull simulator-api redis || true
+
+      - name: Free disk space
+        # GitHub's ubuntu-latest runner ships ~14 GB free and a pile of
+        # preinstalled images. The stack's own images plus the build cache
+        # need room, and a runner whose disk fills up turns `docker build`
+        # into a fifteen-minute stall rather than an error -- which is
+        # exactly what happened on the development machine when its disk
+        # reached 98%. The build cache is deliberately NOT pruned: it is
+        # what makes the second build fast.
+        run: |
+          df -h / | tail -1
+          docker image prune --force --filter "until=24h.hours" || true
+          docker builder prune --force --filter "until=24h.hours" || true
+          df -h / | tail -1
+
+      - name: Run the verification suite
+        id: verify
+        # The load test runs on main and on manual dispatch only: it is
+        # slow, and it puts the backend under real load.
+        run: |
+          ARGS="--json verify.json --skip-load-test"
+          if [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ARGS="--json verify.json --with-load-test --load-duration 30 --load-vus 10"
+          fi
+          echo "running: ./scripts/verify-all.sh $ARGS"
+          set +e
+          ./scripts/verify-all.sh $ARGS
+          STATUS=$?
+          set -e
+          echo "verify-all exit status: $STATUS"
+          exit $STATUS
+
+      - name: Report the environment afterwards
+        # A slow run is worth diagnosing rather than guessing at. Disk
+        # space is the first thing to check: a nearly-full Docker disk
+        # turns a build into a stall instead of an error.
+        if: always()
+        run: |
+          echo "--- disk ---"
+          df -h / | tail -1
+          echo "--- docker ---"
+          docker system df || true
+          echo "--- compose ---"
+          docker compose ps -a || true
+
+      - name: Summarise the suites
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          if not os.path.exists("verify.json"):
+              print("no report was written")
+              raise SystemExit(0)
+
+          with open("verify.json") as handle:
+              report = json.load(handle)
+
+          print("verdict:", report.get("verdict"))
+          for name, suite in report.get("suites", {}).items():
+              print(f"  {name:<16} {suite.get('status', '?'):<8} {suite.get('summary', '')}")
+          PY
+
+      - name: Upload the verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-${{ github.run_number }}
+          path: |
+            verify.json
+            loadtest/results/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Bring the stack down
+        if: always()
+        run: docker compose down -v || true

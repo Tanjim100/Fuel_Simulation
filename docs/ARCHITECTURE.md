@@ -253,6 +253,7 @@ the guarantee that every figure on screen came from the backend.
 ├── loadtest/                  the k6 scripts + the Python harness
 ├── observability/             the Prometheus + Grafana overlay
 ├── scripts/                   verify-all.sh, the demo scripts
+├── .github/workflows/ci.yml   the CI workflow — runs verify-all.sh on every push
 ├── docs/                      this documentation set
 └── docker-compose.yml         the five services
 ```

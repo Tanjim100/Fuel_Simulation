@@ -597,6 +597,12 @@ def main() -> int:
 
     before = metrics_snapshot(client)
 
+    # Captured BEFORE the scenarios run. The report's `started_at` is the
+    # moment the load began, not the moment the report was assembled --
+    # reading it as the latter makes a 90-second run look like it started
+    # when it finished.
+    started_at = datetime.now(timezone.utc).isoformat()
+
     scenarios = [
         ("W1-decision", "POST /api/optimize -- the end-to-end decision path",
          scenario_w1),
@@ -637,7 +643,8 @@ def main() -> int:
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "tool": "python-harness",
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": started_at,
+        "ended_at": datetime.now(timezone.utc).isoformat(),
         "duration_seconds": args.duration,
         "vus": args.vus,
         "concurrency": args.vus,

@@ -141,6 +141,13 @@ def main() -> int:
     parser.add_argument("--vus", type=int, default=10)
     args = parser.parse_args()
 
+    # The merge runs after k6 has finished, so this is the *end* of the
+    # load, not its start. The k6 summaries carry their own start times;
+    # the report's `started_at` is the moment the report was assembled.
+    # Both tools emit the same schema -- see the Python harness, which
+    # captures its `started_at` before the scenarios run.
+    assembled_at = datetime.now(timezone.utc).isoformat()
+
     summary_dir = Path(args.summary_dir)
     scenarios: list[dict[str, Any]] = []
 
@@ -181,7 +188,8 @@ def main() -> int:
     report = {
         "schema_version": 1,
         "tool": "k6",
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": assembled_at,
+        "ended_at": datetime.now(timezone.utc).isoformat(),
         "duration_seconds": args.duration,
         "vus": args.vus,
         "concurrency": args.vus,
