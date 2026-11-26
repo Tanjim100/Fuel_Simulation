@@ -8,7 +8,7 @@ apiVersion: 1
 providers:
   - name: buetcsefest
     orgId: 1
-    folder: BUET CSE Fest
+    folder: BUP CSE Fest
     type: file
     disableDeletion: false
     updateIntervalSeconds: 30
