@@ -1,42 +1,726 @@
-# BUP Fuel Supply Simulator — Verification Harness, Operator Backend, Console & Observability
+# The Platform — A Complete Guide
 
-A complete, runnable local setup that connects to, interacts with, and verifies
-**every API surface** of the BUP Fuel Supply Simulator
-(`asifmahmoud414/bup-fuel-supply-simulator:1.0.0`), plus the **operator backend**
-that forecasts, optimises and dispatches fuel shipments against it, and the
-**operator console** that puts a human in front of that backend — with the
-**observability, resilience and load-testing** layer that proves the platform
-is healthy, degrades safely, and knows its own limits.
+**BUP CSE Fest 2026 · Fuel Supply Intelligence & Resilience Platform**
 
-It consists of:
+This document explains the whole system in one place: **what it is**, **what
+stack it is built on**, **how it is implemented**, **how each problem is
+solved**, and **how to run and use it**.
 
-| Service | Image / Build | Purpose |
-| :--- | :--- | :--- |
-| `simulator-api` | `asifmahmoud414/bup-fuel-supply-simulator:1.0.0` | The simulator (the *world*). |
-| `redis` | `redis:alpine` | Cache layer for read snapshots + state tracking. |
-| `client-verifier` | `./verifier` (Python 3.11) | Defensive client + end-to-end verification suite. |
-| `backend` | `./backend` (Python 3.11) | Operator backend: SSE broker + pre-flight validator + optimiser + forecast + anomaly detection + explanation layer + circuit breaker + metrics + DLQ. |
-| `frontend` | `./frontend` (Node 22) | Operator console: a focused, tabbed dashboard over the backend's API. |
-
-Plus a defensive async client (`simulator_client.py`), a 49-check
-verification suite (`verify_simulator.py`), the backend service
-(pre-flight validator, optimiser, forecast, anomaly detection, SSE broker,
-dispatch API — see [`docs/BACKEND.md`](docs/BACKEND.md)), and the operator
-console (see [`docs/DASHBOARD.md`](docs/DASHBOARD.md)).
-
-To test the system under stress, inject domain events and API faults into the
-simulator — see [`docs/TESTING.md`](docs/TESTING.md).
-
-> **New here?** [`PLATFORM.md`](PLATFORM.md) is the one-document guide to the
-> whole system: what stack it is built on, how it is implemented, how each
-> problem is solved, and how to run and use it. Read that first if you are
-> picking this project up cold.
+It is written for a judge, a teammate, or a person six months from now who has
+to pick the project up cold. Everything here is verifiable — every claim has a
+command or a file reference behind it.
 
 ---
 
-## 1. Quick start
+## Table of contents
 
-From the project root (`BUET CSE Fest/`):
+1. [What this platform is](#1-what-this-platform-is)
+2. [The problem, and why the naive answers fail](#2-the-problem-and-why-the-naive-answers-fail)
+3. [The stack](#3-the-stack)
+4. [How the system is implemented](#4-how-the-system-is-implemented)
+5. [How each problem is solved](#5-how-each-problem-is-solved)
+6. [How to use it](#6-how-to-use-it)
+7. [How it is verified](#7-how-it-is-verified)
+8. [Configuration](#8-configuration)
+9. [The API surface](#9-the-api-surface)
+10. [Where to read next](#10-where-to-read-next)
+
+---
+
+## 1. What this platform is
+
+A fuel-distribution operator has a network: **2 depots**, **4 stations**,
+**6 routes**, and three fuel grades (**DIESEL**, **PETROL**, **OCTANE**).
+Demand shifts. Tanks run low. Routes break. The operator has to answer one
+question continuously:
+
+> *What should I ship, from where, to where, how much, and can I afford to do
+> it?*
+
+This platform answers that question, and — just as importantly — **tells the
+operator when it cannot answer it**, and says why.
+
+### The five services
+
+| Service | Port | What it owns |
+| :--- | :---: | :--- |
+| `simulator-api` | 8000 | The world. Organizer-provided, read-mostly. Never modified. |
+| `redis` | 6379 | Cache, pub/sub, the SSE fan-out. |
+| `client-verifier` | 8001 | The 49-check conformance suite + a health sidecar. |
+| `backend` | 8002 | The intelligence layer: snapshot, forecast, anomalies, optimiser, gate, journal, metrics. |
+| `frontend` | 8003 | The operator console. |
+
+Plus an **opt-in** overlay (`observability/compose.monitoring.yml`) adding
+Prometheus (9090) and Grafana (3000). It is *not* part of the default stack,
+on purpose — see [§3.4](#34-why-monitoring-is-opt-in).
+
+### The one-line summary
+
+> The backend turns a **live, unreliable world** into a **defensible, auditable
+> recommendation**, and refuses to pretend when the world is unavailable.
+
+---
+
+## 2. The problem, and why the naive answers fail
+
+A fuel platform looks easy from the outside. It is not. Six traps live here,
+and each one has a specific engineering answer in this codebase.
+
+### Trap 1 — The world is stochastic, so the forecast is an estimate
+
+Demand is driven by a seeded pseudo-random generator inside the simulator. A
+plausible dashboard shows a demand curve and calls it a prediction. That is
+wrong in a way that matters: an operator cannot act on "roughly 8,000 litres".
+
+**The answer:** the backend **re-implements the simulator's exact demand
+formula**, including its SHA-256-seeded RNG, and `GET /api/forecast/validate`
+compares the forecast against the simulator's live `demand-history` history.
+The comparison is exact to `1e-3` litres. The forecast is not a prediction of
+the future — it is a **reproduction** of it. `backend/app/forecast.py`.
+
+### Trap 2 — The simulator rejects writes, and its rejection reasons are ordered
+
+Ship too much on a route → the simulator refuses. Ship more than a depot has →
+refused. Ship to a station with no free space → refused. But **which** reason
+does it report when a request violates several at once?
+
+**The answer:** the simulator's validation order is **fixed**, not
+magnitude-ordered:
+
+```
+ROUTE_MAX_SHIPMENT → DEPOT_INVENTORY → DISPATCH_CAPACITY → STATION_FREE_SPACE
+```
+
+The binding constraint is the **first limit in that order the request
+exceeds**, never the numerically smallest. The backend's pre-flight validator
+mirrors this exactly, in `backend/app/validator.py:78-89`. It is proven by a
+**differential oracle test** (`backend/tests/test_validator_against_simulator.py`,
+643 lines) that fires requests at the live simulator and asserts the backend
+predicts the same code every time. A separate `_tightest()` function exists
+for *planning* — where "tightest" genuinely is the smallest — so the two
+concepts never contaminate each other.
+
+### Trap 3 — Arrival is one tick later than the docs say
+
+A shipment created on tick N departs on tick N and is *scheduled* to arrive on
+tick N + `transit_ticks`. The arrival is **applied** when the counter advances
+past the expected tick, so `ARRIVED` is observed **`transit_ticks + 1` steps**
+after creation.
+
+**The answer:** every part of the system that reasons about arrival uses the
+same `+1` semantics — forecast, state, optimiser, LP solver, and the verifier.
+Documented at `verifier/verify_simulator.py:381-385`. Getting this wrong by
+one tick would silently corrupt every stock-out risk calculation.
+
+### Trap 4 — A replay looks exactly like a first write
+
+The simulator returns **HTTP 201 for both**. Status code cannot distinguish
+"created" from "replayed". A dispatch flow that retries on timeout would
+ship twice.
+
+**The answer:** idempotency is detected by **tracking the highest allocation
+id already seen**, not by status. `backend/app/simulator_client.py:740`. The
+verifier's check #2 ("Replaying the same key + body is idempotent") and check
+#11 ("a cancelled idempotency key stays occupied") pin both halves.
+
+### Trap 5 — An outage must not become a total outage
+
+The obvious failure mode: the upstream goes down, every request retries three
+times with backoff, and a single slow upstream turns into a 13.75-second stall
+on *every* request, which exhausts the server's workers, which looks exactly
+like "the backend is down".
+
+**The answer:** a **circuit breaker** wrapping the upstream client. When it
+trips, an open breaker rejects in **under 1 ms** instead of burning a
+13.75-second retry budget. Reads then degrade to the last-known-good cached
+world with an honest `degraded: true` flag; writes refuse with
+`503 CIRCUIT_OPEN`. See [§5.6](#56-resilience-the-circuit-breaker) and
+`docs/RESILIENCE.md`.
+
+### Trap 6 — A metric that counts reads counts the reader, not the world
+
+The anomaly detectors recompute against the live world on **every** request. If
+the counter increments where the detector runs, then the "alert rate" on your
+dashboard is a function of **how often the console refreshed**. Three polls
+moved `backend_shortage_alerts_total{severity="HIGH"}` from 7 to 10 — the
+world did not change, the viewers did.
+
+**The answer:** count-once trackers. Each finding is counted **once, when it is
+first detected**, and the tracker resets when the world advances to a new tick.
+Five polls of an unchanged world move nothing. Pinned by
+`backend/tests/test_metrics.py`.
+
+### The seventh trap — the one that actually took the platform down
+
+This project once wedged: the simulator held exactly **15 database handles**,
+every request blocked for **30 seconds**, and it was found by reading logs
+hours later. The failure mode had **no signal at all**.
+
+**The answer:** the backend owns the semaphore that bounds its own demand on
+the simulator's pool, so it can measure its own saturation exactly:
+
+```
+backend_simulator_pool_saturation_ratio = inflight_reads / fetch_concurrency_limit
+```
+
+Above **0.8**, the simulator's 15-wide pool is one notch from being the
+bottleneck. A regression test (`backend/tests/test_pool_saturation.py`) asserts
+the bound is never exceeded and the gauge never exceeds 1.0 — turning the
+incident into an **executable invariant**. See
+[§5.8](#58-the-pool-saturation-signal).
+
+---
+
+## 3. The stack
+
+### 3.1 Services and runtime
+
+| Layer | Technology | Why this and not the obvious alternative |
+| :--- | :--- | :--- |
+| API | **Python 3.11 / FastAPI** | The simulator, the verifier and the backend are all Python — one language across the whole boundary, no polyglot glue. |
+| ASGI | **Uvicorn** | Standard, no extra moving parts. |
+| HTTP client | **httpx** | Async-native, which the broker and breaker need. |
+| Validation | **Pydantic v2** | FastAPI's native model layer. |
+| Cache / pub-sub | **Redis 7** | The SSE fan-out and the invalidation path both want it; `redis-py` is already a dependency. |
+| Durable state | **SQLite** (stdlib `sqlite3`) | The dispatch journal and the DLQ. Both are small, local, and must survive a Redis flush. No database service added. |
+| Frontend | **React 18 + TypeScript 5.7 + Vite 6** | Typed, fast to build, and the runtime image ships only `dist/` — no toolchain, no source. |
+| Frontend tests | **Vitest + Testing Library** | Same runner as the build toolchain; no second test stack. |
+| Monitoring | **Prometheus + Grafana** (opt-in) | The PDF names them; the stack does not *depend* on them. |
+
+### 3.2 Dependencies — the complete list
+
+**Backend** (`backend/requirements.txt`, 7 packages):
+
+```
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+httpx>=0.27,<0.29
+pydantic>=2.7,<3.0
+redis>=5.0,<6.0
+pytest>=8.0,<9.0
+pytest-asyncio>=0.23,<1.0
+```
+
+**Frontend** (`frontend/package.json`): 2 runtime dependencies (`react`,
+`react-dom`) and 10 dev dependencies (TypeScript, Vite, Vitest, Testing
+Library, jsdom).
+
+### 3.3 What is deliberately *not* a dependency
+
+This is the part that distinguishes a considered stack from a collected one.
+
+| Not used | What was used instead | Why |
+| :--- | :--- | :--- |
+| `prometheus_client` | `backend/app/metrics.py` — a hand-rolled text writer, 785 lines | The PDF says the stack is the team's choice. A hand-rolled writer has **zero new dependencies**, keeps the backend image slim and offline-buildable, and is small enough to *read* — and reading it is how the team knows the exposition is correct. |
+| `PyYAML` | `backend/app/scenario.py` — a 447-line YAML-subset parser | One config file, one nesting level, one scalar type. A full YAML parser is a supply-chain surface for a job that is 30 lines of dict access. |
+| `pulp` | `backend/app/lp_solver.py` — a stdlib linear program solver (613 lines) | The LP path is **import-guarded and optional**; the greedy solver is the default and is what runs in the shipped image. PuLP would be a native build dependency for an optional path. |
+| `pandas` / `numpy` | stdlib `array` and `math` | The LP solver needs none of it. |
+| A state-management library (Redux/Zustand) | `frontend/src/lib/useBackend.ts` — one hook, one fetch loop | The console has one source of truth and four tabs. A store would be ceremony. |
+
+### 3.4 Why monitoring is opt-in
+
+Adding Prometheus and Grafana as *default* services would grow the stack from
+5 to 7 and make `docker compose up -d` heavier and more failure-prone — which
+directly contradicts the PDF's "reproducibly runnable" (§13) and "do not
+introduce infrastructure complexity unless it improves your solution" (§7).
+
+So monitoring lives in a **separate compose overlay**:
+
+```bash
+docker compose -f docker-compose.yml -f observability/compose.monitoring.yml up -d
+```
+
+The default stack is still exactly five healthy services. The *evidence* —
+a working `/metrics` endpoint, a real 19-panel dashboard, nine alert rules —
+is the default artefact, not the running infrastructure.
+
+---
+
+## 4. How the system is implemented
+
+### 4.1 The architecture
+
+```
+   ┌──────────────────────┐
+   │    simulator-api     │  :8000   the world (organizer-provided)
+   │  tick · demand ·     │
+   │  inventory · routes  │
+   └──────────┬───────────┘
+              │  HTTP (httpx, retried, breaker-wrapped)
+   ┌──────────▼───────────┐        ┌──────────────────────────────┐
+   │       backend        │ :8002  │  client-verifier    :8001    │
+   │                      │        │  49 conformance checks        │
+   │  ┌──────────────────┐ │        └──────────────────────────────┘
+   │  │ snapshot cache   │ │
+   │  │ SSE broker       │◄┼──────────── redis :6379
+   │  │ forecast         │ │           (cache + pub/sub)
+   │  │ anomaly detectors│ │
+   │  │ optimiser + gate │ │
+   │  │ journal + DLQ    │ │
+   │  │ circuit breaker  │ │
+   │  │ metrics          │ │
+   │  └──────────────────┘ │
+   └──────────┬───────────┘
+              │  /api/*  (JSON)          ┌───────────────────────────┐
+   ┌──────────▼───────────┐              │  frontend  :8003          │
+   │   operator console   │              │  React + TypeScript       │
+   │  status · action ·   │              │  one column, 4 tabs       │
+   │  network · forecast  │              └───────────────────────────┘
+   │  problems · system   │
+   └──────────────────────┘
+                    │
+                    │ GET /metrics  (Prometheus text)
+                    ▼
+         ┌──────────────────────────────┐
+         │ Prometheus :9090 → Grafana   │  (opt-in overlay)
+         └──────────────────────────────┘
+```
+
+### 4.2 The read path: snapshot first, simulator second
+
+The console polls every 5 seconds. The simulator is expensive and sometimes
+slow. So the backend keeps a **cached world snapshot** and serves reads from
+it.
+
+```
+console poll
+    │
+    ▼
+GET /api/state ──► snapshot cache ──► 200 with the cached world
+                         │
+                         │ (if stale, the refresher is already running)
+                         ▼
+                  GET /api/stations, /api/depots, /api/routes
+```
+
+The refresher (`backend/app/broker.py`) runs on its own interval and is bounded
+by a semaphore of `FETCH_CONCURRENCY = 4`. **This is why the console's read
+paths never touch the simulator at all** — visible in the load test, where
+`GET /api/stations` records a pool-saturation peak of **0.25** while
+`POST /api/optimize` records **1.00**.
+
+### 4.3 The decision path: the gate
+
+A write path is where the danger lives, so it is deliberately narrow.
+
+```
+POST /api/plan ──► pre-flight validator ──► optimiser ──► explanation
+                        │                      │            │
+                        │ reject?             │            └─► why, in prose,
+                        ▼                      │                with every number
+                   409 / 404 / 422             ▼                declared
+                                         POST /api/execute
+                                                │
+                                    ┌───────────┴───────────┐
+                                    ▼                       ▼
+                              journal (write-ahead)    simulator /v1/allocations
+                                    │                       │
+                                    └───────────┬───────────┘
+                                                ▼
+                                          two-click dispatch
+```
+
+**The journal is written before the simulator is called.** If the process dies
+mid-dispatch, the intent survives in SQLite and the console shows the last
+dispatch's state (`created` / `replayed` / `failed` / `dispatched`).
+
+**Dispatch is two-click.** The console's button is disabled when there is
+nothing to ship, and a click only *dispatches the plan* — a separate
+`POST /api/execute` re-plans against a fresh snapshot and then executes. The
+operator sees the plan before the world changes.
+
+### 4.4 The gate's rejected-shipping reason
+
+The optimiser produces a set of shipments. Some may be executable now; others
+must wait for the next tick. `backend/app/routers/optimizer.py` splits them:
+
+- `shipments_now` — executable this tick.
+- `shipments_later` — deferred.
+- `gated.rejected` — refused, each with a **reason** from the validator
+  (`ROUTE_CAPACITY_EXCEEDED`, `DEPOT_INVENTORY_EXHAUSTED`, …).
+
+The console renders `accepted ok / rejected no` — the operator sees what was
+dropped and why, not just a count.
+
+### 4.5 The explanation layer
+
+Every decision comes with prose. That prose is **deterministic** and
+**auditable**:
+
+- `backend/app/explain.py` builds an `Explanation` carrying a `verdict`, a
+  `headline`, `details`, `risks`, `next_actions`, and a `numbers` map that
+  **declares every figure quoted in the prose**.
+- `unaccounted_numbers()` (`explain.py:747`) scans the prose for any number
+  that was **not** declared — and flags it.
+- The console renders the `numbers` map **verbatim** via `NumberChips`, so a
+  reader can check each sentence against its figures.
+
+An **LLM prose layer** exists (`backend/app/llm.py`) but is **off by default**
+and **AST-isolated** — it runs in a separate process with a timeout, and its
+output passes `is_safe_prose`, so it cannot introduce a number the backend did
+not send. `backend/tests/test_llm_isolation.py` (316 lines) proves the
+isolation.
+
+### 4.6 The console: one column, three tiers
+
+The old console was three columns of nine expanded panels. The redesign is
+deliberately narrow (`frontend/src/App.tsx:1-21`):
+
+1. **Status** — four facts. Is anything wrong right now?
+2. **The action** — what to do, why, and the one button that does it.
+3. **The drill-down** — four tabs (Network, Forecast, Problems, System), one at
+   a time.
+
+Plus a **StaleBanner** that fires when the snapshot is stale, the SSE is
+unreachable, or a resync is required — *"a console that shows numbers without
+saying how old they are is a console that can lie."*
+
+### 4.7 The console invariant: no invented numbers
+
+**Every number the console renders is a backend number or a documented pure
+derivation.** This is not a convention — it is an **executable test**
+(`frontend/src/test/no-invented-numbers.test.tsx`, 294 lines):
+
+1. `scrapeNumbers` scrapes number-like tokens **per leaf element** (not from
+   concatenated `textContent` — concatenation glues `'4,392'` and `'0 drops'`
+   into `'4,3920 drops'`, a number that was never displayed anywhere).
+2. `backendNumbers()` walks every fixture and adds each value plus its
+   roundings.
+3. `derivedNumbers()` calls the **same shared derivation functions the panels
+   use** — so a panel that derives a value the test doesn't know about
+   *fails*, and a panel that computes a value *differently* from the shared
+   function *also fails*.
+4. The scraped set must be a **subset**.
+
+The architecture behind it: `lib/derive.ts` holds **all** derivation (307
+lines, 21 functions); `lib/format.ts` holds **all** formatting and computes no
+business figure — *"a display function that derives a number is a display
+function that can disagree with the backend."*
+
+### 4.8 The observability surface
+
+Three endpoints, three jobs, that **must not drift**:
+
+| Endpoint | Format | Audience |
+| :--- | :--- | :--- |
+| `GET /metrics` | `text/plain; version=0.0.4` | A Prometheus scraper. **Bare path, no `/api` prefix.** |
+| `GET /api/observability` | `application/json` | The console's System tab, the load-test harness. |
+| `GET /api/metrics` | `application/json` | The simulator's **business KPIs**. The console's original contract. |
+
+The console **never parses a Prometheus text exposition** — doing so would put
+a number-parsing bug inside the guarantee that every figure on screen came
+from the backend.
+
+---
+
+## 5. How each problem is solved
+
+### 5.1 Forecasting — exact, not approximate
+
+**Problem:** demand is stochastic; an operator cannot act on "roughly 8,000
+litres".
+
+**Solution:** re-implement the simulator's demand formula exactly, including
+its SHA-256-seeded RNG, over a 16-tick horizon, across three fuel types.
+`backend/app/forecast.py` (842 lines).
+
+- **Verification:** `GET /api/forecast/validate` pulls the simulator's live
+  `demand-history` and compares. Exactness is enforced to `1e-3` litres.
+  A live run right now: **84 compared, 84 matched, 0 mismatched,
+  largest error 0.0 L, verdict `EXACT`.** `backend/tests/test_forecast.py`
+  (625 lines) checks the same thing offline against a 60-row golden fixture
+  captured from the simulator.
+- **Fallback:** if the oracle cannot run, the forecast is marked
+  `UNAVAILABLE` and the `backend_forecast_fallback` counter increments — it
+  never silently guesses.
+
+### 5.2 The pre-flight validator — mirror the rules, not the guesses
+
+**Problem:** the simulator rejects writes, and its rejection reasons are
+**fixed-ordered**.
+
+**Solution:** `backend/app/validator.py` (967 lines) mirrors the order:
+
+```
+ROUTE_MAX_SHIPMENT → DEPOT_INVENTORY → DISPATCH_CAPACITY → STATION_FREE_SPACE
+```
+
+and distinguishes **terminal** rejections (404 / 409 / 422 — the simulator
+*answering*) from **retryable** failures (timeout / 503 / transport — the
+simulator *failing*). Only the second group may trip the circuit breaker;
+counting the first would take the whole backend down because one station's
+tank was full.
+
+**Verification:** a **differential oracle** — `test_validator_against_simulator.py`
+(643 lines) fires real requests at the live simulator and asserts the backend
+predicts the same code every time.
+
+### 5.3 Anomaly detection — seven kinds, counted once
+
+**Problem:** the operator needs to know what changed and how much it matters,
+without being flooded.
+
+**Solution:** `backend/app/anomaly.py` (968 lines) emits seven anomaly kinds
+over a rolling 32-tick observation log (bounded at 4,096 entries):
+
+| Kind | Trigger |
+| :--- | :--- |
+| `DEMAND_SPIKE` | Demand z-score above 3.0 (MEDIUM) / 5.0 (HIGH) |
+| `DEMAND_NORMALISED` | The spike has passed — the recovery is itself news |
+| `INVENTORY_DROP` | Absolute drop > 250 L **or** > 20% of previous |
+| `DEPOT_BOTTLENECK` | Depot allowance remaining below 500 L |
+| `ROUTE_BOTTLENECK` | Route capacity nearly exhausted |
+| `SUPPLY_SHORTFALL` | Supply cannot meet demand |
+| `STOCKOUT_RISK` | The forecast says a tank runs dry |
+
+Anomalies are grouped into **incidents** over an 8-tick window, so a storm of
+related anomalies reads as one event with one explanation.
+
+**The count-once rule:** the three "detected" counters
+(`backend_shortage_alerts_total`, `backend_anomalies_total`,
+`backend_incidents_total`) increment **once per finding, when it is first
+detected** — not once per read. A tracker remembers what it has counted and
+resets when the world advances to a new tick.
+
+**The kinds are derived, not hand-copied.** `ANOMALY_KINDS` is computed from
+the constants in `anomaly.py`, because a hand-copied list is free to drift —
+and it did: `STATION_OUTAGE` was registered but never emitted, while
+`DEPOT_BOTTLENECK` and `STOCKOUT_RISK` were emitted but never registered.
+Deriving the list removes the second copy; two regression tests now guard it.
+
+### 5.4 Optimisation — greedy by default, LP when it helps
+
+**Problem:** decide what to ship, from where, to where, how much.
+
+**Solution:** `backend/app/optimizer.py` (1,142 lines) solves a constrained
+allocation problem over a 16-tick horizon (4 hours), subject to constraints
+C1–C10: route max shipment, depot inventory, dispatch capacity per tick,
+station free space, route connectivity, single-connected-station safety stock,
+and more.
+
+- **Default solver: greedy.** Deterministic, fast, and correct on the shipped
+  path.
+- **Optional solver: LP.** `backend/app/lp_solver.py` (613 lines) implements a
+  stdlib simplex-style solver — **no PuLP**. The path is import-guarded;
+  `GET /api/solver` reports which solver is active and why.
+- **Verification:** `test_optimizer_against_simulator.py` (472 lines) is a
+  second differential oracle against the live simulator.
+
+### 5.5 The explanation layer — deterministic, auditable, LLM-isolated
+
+Covered in [§4.5](#45-the-explanation-layer). The key properties:
+
+- Every number in the prose is **declared** in `Explanation.numbers`.
+- `unaccounted_numbers()` flags any number that is not declared.
+- The console renders the declared map verbatim.
+- The optional LLM is off by default, isolated by AST, and cannot introduce a
+  number.
+
+### 5.6 Resilience — the circuit breaker
+
+**Problem:** the upstream can time out, fail, or be injected-faulty. The
+client retries 3× with backoff, so one logical call can block for **13.75 s**
+(4 attempts × 3.0 s + 0.25 + 0.5 + 1.0 s of backoff).
+
+**Solution:** `backend/app/circuit_breaker.py` (433 lines).
+
+```
+CLOSED    --(N consecutive retryable failures)-->  OPEN
+OPEN      --(after cooldown, first call)--------->  HALF_OPEN
+HALF_OPEN --(1 success)-------------------------->  CLOSED
+HALF_OPEN --(1 failure)-------------------------->  OPEN
+```
+
+**The breaker wraps the client; it does not edit it.** This is structural, not
+stylistic: `backend/app/simulator_client.py` must stay **byte-identical** to
+`verifier/simulator_client.py`, enforced by a SHA-256 drift guard
+(`backend/tests/test_client_parity.py`). Editing the client would mean editing
+the reference first, re-running the 49 checks, then re-copying — and would
+put a resilience mechanism inside a file whose whole value is that it is
+unmodified.
+
+**The measured effect:** an open breaker rejects in **under 1 ms** — asserted
+by `test_an_open_breaker_rejects_in_under_a_millisecond`
+(`backend/tests/test_circuit_breaker.py:190`) — instead of 13.75 s.
+
+**Degraded mode** — the breaker changes what each endpoint means:
+
+| Endpoint | Behaviour when the breaker is OPEN |
+| :--- | :--- |
+| `GET /api/state`, `/api/stations`, `/api/depots`, `/api/routes` | **200** with the cached snapshot plus `degraded: true` and `degraded_reason`. |
+| `GET /api/health` | **200** with `status: "degraded"` and the circuit state. |
+| `POST /api/plan`, `POST /api/execute` | **503** `CIRCUIT_OPEN` — writes must not silently plan against a stale world. |
+
+**Two claims kept apart.** The simulator's `/health` is a liveness check on
+the *process*; a fault injected against the *data* endpoints leaves it
+answering while every read fails. Reporting "ok" then would be the worst
+possible answer — so an open circuit degrades the status regardless of what
+the probe says. The converse is handled too: the probe **bypasses** the
+breaker, because an open breaker means *we* are not calling, not that the
+upstream is down.
+
+### 5.7 The stream — SSE with a watchdog and a polling fallback
+
+**Problem:** SSE drops silently. A console that loses its stream and does not
+notice shows a stale world as if it were live.
+
+**Solution:** `backend/app/broker.py` (970 lines):
+
+- Subscribes to the simulator's SSE stream and fans events out to dashboard
+  subscribers through Redis pub/sub, with a **per-subscriber bounded queue**
+  (64). A subscriber whose queue is full has its events **dropped and
+  counted** (`backend_sse_events_dropped_total`), never silently discarded.
+- A **watchdog** samples every 5 s. If no event arrives while the world has
+  advanced for longer than `SSE_STALE_AFTER` (45 s), that is a **suspected
+  drop** — counted, and the broker **falls back to polling**.
+- After `SSE_RECOVER_AFTER` (10 s) of poll-only operation, the broker tries to
+  reclaim SSE.
+- `SSE_MAX_LIFETIME` (900 s) forces a fresh subscription, so a long-lived
+  connection cannot rot.
+- The broker's mode is a **number** (`0`=sse, `1`=polling, `2`=offline) so a
+  Prometheus gauge can carry it — and `CLOSED`, the healthy circuit state, is
+  deliberately `0`, so "2" is unambiguously the broken one.
+
+### 5.8 The pool-saturation signal
+
+**Problem:** the backend cannot read the simulator's internal connection pool.
+
+**Solution:** it owns the semaphore that bounds its own demand, so it measures
+its own saturation exactly:
+
+```
+backend_simulator_pool_saturation_ratio = inflight_reads / fetch_concurrency_limit
+```
+
+Above **0.8** is the early-warning line. Each simulator request holds **2**
+connections, so 8 concurrent reads demand 16 > the simulator's 15-wide pool —
+**overrunning the pool is a deadlock, not a slow-down.** Hence
+`FETCH_CONCURRENCY = 4`.
+
+`backend/tests/test_pool_saturation.py` drives concurrent refreshes against a
+stubbed client and asserts the bound is never exceeded and the gauge never
+exceeds 1.0.
+
+### 5.9 The DLQ — quarantine, don't crash
+
+**Problem:** one malformed SSE frame, or one allocation payload that does not
+match the model, must not kill the world's event feed.
+
+**Solution:** `backend/app/dlq.py` (323 lines) — a bounded, on-disk dead-letter
+queue with a Redis mirror.
+
+- Malformed payloads become DLQ entries (`id`, `reason`, `source`, `payload`,
+  `received_at`, `attempts`) instead of raising into the event loop.
+- **The subscription survives.** The bad frame is quarantined; the feed keeps
+  running.
+- Stored in Redis (bounded at 1,000, oldest evicted) **and** appended to
+  SQLite at `/app/data/dlq.sqlite3`, so it survives a Redis flush.
+- `GET /api/dlq` lists entries; `POST /api/dlq/{id}/retry` replays one through
+  the original handler.
+
+### 5.10 Idempotency and the journal
+
+**Problem:** a dispatch that times out after the simulator accepted it would
+ship twice.
+
+**Solution:** the journal (`backend/app/journal.py`, 355 lines) is written
+**before** the simulator call; the client detects a replay by allocation-id
+tracking, not status code; and the console shows the last dispatch's state.
+
+### 5.11 Scenario configuration — nothing hardcoded
+
+**Problem:** the demand profiles, region factors and epoch were transcribed
+from the simulator image's `baseline.yaml` and pasted into Python literals.
+Correct today, but a copy of a file that cannot be swapped.
+
+**Solution:** `backend/scenarios/baseline.yaml` + `backend/app/scenario.py`
+(447 lines, with a custom YAML-subset parser). The file is **validated at
+boot** — an unknown profile, a missing fuel or a region without a factor is an
+error, not a runtime surprise. `forecast.py`'s `PROFILES`,
+`REGION_DEMAND_FACTORS` and `FORECAST_START_TIME` become *values derived from
+the config*, with the public names preserved so every import and test keeps
+working.
+
+**The guard:** the forecast oracle must still pass unchanged — the offline
+golden fixture (60 of 60 exact rows) and the live oracle (currently 84 of 84).
+If the YAML and the old literals ever disagree, the oracle fails — which is the
+point. `backend/tests/test_scenario_config.py` (445 lines) asserts the loaded
+config **equals** the previously hardcoded values.
+
+### 5.12 Observability — three layers by metrics, one by logs
+
+PDF §15 names four layers: **application**, **system**, **intelligence** and
+**logs**. The honest coverage statement:
+
+> **Three layers are met with metric families; the fourth — logs — is met with
+> the backend's structured logging, because a log line is not a metric.**
+
+29 metric families cover application (request rate, latency, error rate,
+availability), system (pool saturation, in-flight reads, queue depth) and
+intelligence (forecast error, shortage alerts, decision frequency, **fallback
+activation** — named explicitly in §15). The Grafana dashboard has a **fourth
+row, resilience**, which §15 does not list but which is where this platform's
+most important operational signal lives.
+
+Logs cover the fourth layer with **60 log statements** across fourteen modules,
+at four levels (`warning`, `info`, `exception`, `debug`): integration failures
+(`simulator_client.py`), decision events (`broker.py`, `dispatch.py`,
+`journal.py`), recoveries (`circuit_breaker.py`), and quarantined payloads
+(`dlq.py`).
+
+**Two subtleties worth knowing:**
+
+- **Route-template labels.** Metrics label `path` with
+  `request.scope["route"].path`, never the raw path — otherwise
+  `/api/stations/station-mirpur` and `/api/stations/station-tongi` become
+  separate time series and the cardinality explodes. Unmatched paths fall back
+  to `"unmatched"`; paths over 64 characters are capped.
+- **Histogram percentiles.** A histogram's samples live under their *label
+  set*. `percentile(0.95)` reads the empty key and returns **0.0 — always**.
+  `percentile_across(0.95)` pools every label set. This was a **real bug**
+  here: the health endpoint reported `p95_seconds: 0.0` while serving 12,681
+  requests. It is now guarded by three regression tests.
+
+Full catalogue: `docs/OBSERVABILITY.md`.
+
+### 5.13 The health table (PDF §16)
+
+`GET /api/health` carries the table a judge reads. Live right now:
+
+```json
+{
+  "status": "ok",
+  "components": {
+    "backend_api":        {"state": "HEALTHY"},
+    "redis":              {"state": "HEALTHY"},
+    "fuel_simulator":     {"state": "HEALTHY"},
+    "prediction_service": {"state": "HEALTHY"},
+    "decision_engine":    {"state": "HEALTHY"}
+  },
+  "latency":  {"p95_seconds": 0.022541, "p50_seconds": 0.004429},
+  "requests": {"total": 3382, "errors": 0, "error_rate": 0.0},
+  "circuit":  {"state": "CLOSED", "consecutive_failures": 0, "opened_at": null},
+  "upstream": {"reachable": true, "status": "ok", "error": null},
+  "broker":   {"mode": "sse", "events_received": 194},
+  "journal":  {"path": "/app/data/journal.sqlite3", "total": 30,
+               "by_status": {"CREATED": 30}}
+}
+```
+
+Component states come from a **known set** — `HEALTHY`, `DEGRADED`,
+`UNHEALTHY`, `UNKNOWN`, `DISABLED` — so a dashboard's colour mapping cannot
+break on an unexpected string. The pre-existing keys are **preserved** (the
+console and the container healthcheck both read them); the new ones are added
+alongside.
+
+---
+
+## 6. How to use it
+
+### 6.1 Quick start
+
+**Prerequisites:** Docker Desktop, and a path **without spaces** (see
+[§6.7](#67-the-docker-desktop-constraint)).
 
 ```bash
 # 1. Build and start the whole stack
@@ -44,948 +728,382 @@ docker compose up -d --build
 
 # 2. Confirm all five services are healthy
 docker compose ps
+#   backend           Up (healthy)
+#   client-verifier   Up (healthy)
+#   frontend          Up (healthy)
+#   redis             Up (healthy)
+#   simulator-api     Up (healthy)
 
-# 3. Run the full verification suite inside the verifier container
-docker compose exec -T client-verifier \
-  python verify_simulator.py \
-    --base-url http://simulator-api:8000 \
-    --redis-url redis://redis:6379/0
+# 3. Open the console
+open http://localhost:8003
+```
 
-# 4. Run the backend's own test suite
+### 6.2 Verify everything at once
+
+```bash
+./scripts/verify-all.sh --json /tmp/verify.json
+```
+
+Runs, in order: the **49-check verifier suite**, the **backend pytest suite**,
+the **frontend test suite**, the **load test**, and the **observability
+self-check** (46 assertions covering every §15 layer, the §16 table, the
+content type, and the label sets). Emits one JSON object with per-suite
+pass/fail, counts and durations. Exit code 0 only if everything passed.
+
+### 6.3 Run the suites individually
+
+```bash
+# The 49-check conformance suite, against the live simulator
+docker compose exec -T client-verifier python verify_simulator.py \
+  --base-url http://simulator-api:8000 --redis-url redis://redis:6379/0
+
+# The backend's own suite (must run in-container: the host lacks pytest-asyncio)
 docker compose exec -T backend pytest tests/ -q
 
-# 5. Run the console's test suite
-#    (the console's runtime image is deliberately slim -- no toolchain, no
-#     source -- so the suite runs in the Dockerfile's `test` build target)
+# The console's suite (the runtime image is deliberately slim — no toolchain,
+# no source — so the suite runs in the Dockerfile's `test` build target)
 docker build --target test -t buetcsefest-frontend-test -f frontend/Dockerfile .
 docker run --rm buetcsefest-frontend-test
-
-# 6. Open the console
-open http://localhost:8003
-
-# 7. Tear down
-docker compose down
 ```
 
-Expected output ends with:
+### 6.4 The console
 
-```
-  ALL 49 CHECKS PASSED
-```
+`http://localhost:8003`. Read it top to bottom:
 
-### Or run everything at once
+| Region | What it tells you |
+| :--- | :--- |
+| **Status bar** | Four facts: overall verdict, service level, disrupted routes, closed stations. Plus a Diagnostics disclosure. |
+| **Telemetry bar** | Stream mode, staleness, snapshot age. Red if the world is stale or unreachable. |
+| **ActionCard** | The one action: what to ship, where, how much, why, and the dispatch button. Expand "Why this plan" for the full reasoning and the evidence. |
+| **Tab: Network** | Depots, stations, routes — with meters and badges. |
+| **Tab: Forecast** | Exact demand over the horizon, per station and fuel, with sparklines. |
+| **Tab: Problems** | Anomalies and incidents, each with its evidence and recommended action. |
+| **Tab: System** | The PDF §16 health table, the stream's state, pool saturation, fallback activations. |
 
-`./scripts/verify-all.sh` runs all five suites in order and emits **one JSON
-object** — the harness-compatible entry point. Exit code `0` only if everything
-passed.
+Theme toggle is in the status bar (light/dark, persisted, follows the OS by
+default).
+
+### 6.5 The API, by hand
 
 ```bash
-./scripts/verify-all.sh                      # human-readable
-./scripts/verify-all.sh --json out.json      # machine-parseable
-```
+# Health — the §16 table
+curl -s http://localhost:8002/api/health | python3 -m json.tool
 
-### The two operator-facing endpoints
+# The world
+curl -s http://localhost:8002/api/state     | python3 -m json.tool
+curl -s http://localhost:8002/api/stations  | python3 -m json.tool
+curl -s http://localhost:8002/api/depots    | python3 -m json.tool
+curl -s http://localhost:8002/api/routes    | python3 -m json.tool
 
-```bash
-# The Prometheus exposition (text/plain) — bare path, no /api prefix
-curl -s http://localhost:8002/metrics
-
-# The JSON mirror the console's System tab reads
-curl -s http://localhost:8002/api/observability
-```
-
-`/api/metrics` is a *third* thing and stays JSON — it is the simulator's
-business KPIs, the console's original contract. The three never drift:
-`/metrics` is Prometheus text, `/api/observability` is the platform's own
-metrics as JSON, `/api/metrics` is the world's business KPIs as JSON.
-
-Full detail: [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
-
----
-
-## 1b. The operator backend
-
-The backend owns the **single** upstream SSE subscription, maintains a fresh world
-snapshot, and decides what is legal to dispatch **before** any write reaches the
-simulator.
-
-```bash
-# Health
-curl -s http://localhost:8002/api/health
-
-# Broker state: mode, reachability, drop detection
-curl -s http://localhost:8002/api/stream-health
-
-# Plan a shipment (no write) — returns the plan *and* the reasoning
+# Plan a shipment — READ-ONLY, writes nothing, returns the plan AND the reasoning
 curl -s -X POST http://localhost:8002/api/plan \
   -H 'Content-Type: application/json' \
-  -d '{"source_depot_id":"depot-patiya",
-       "destination_station_id":"station-mirpur",
-       "fuel_type":"DIESEL",
-       "quantity":1000}'
+  -d '{"station_id":"station-mirpur","fuel_type":"DIESEL","quantity":3000}' \
+  | python3 -m json.tool
 
-# Dispatch it (re-plans against a fresh snapshot, then executes)
-curl -s -X POST http://localhost:8002/api/allocations \
-  -H 'Content-Type: application/json' \
-  -d '{"source_depot_id":"depot-patiya",
-       "destination_station_id":"station-mirpur",
-       "fuel_type":"DIESEL",
-       "quantity":1000}'
+# Optimise — also read-only
+curl -s -X POST http://localhost:8002/api/optimize | python3 -m json.tool
 
-# Watch the dashboard event stream
-curl -sN http://localhost:8002/api/events/stream
+# The forecast, and its own oracle against live demand history
+curl -s http://localhost:8002/api/forecast/summary | python3 -m json.tool
+curl -s http://localhost:8002/api/forecast/validate | python3 -m json.tool
+
+# Anomalies, with their explanations
+curl -s http://localhost:8002/api/anomalies | python3 -m json.tool
+
+# The Prometheus exposition (bare path, no /api prefix)
+curl -s http://localhost:8002/metrics | head -40
+
+# The JSON mirror the console's System tab reads
+curl -s http://localhost:8002/api/observability | python3 -m json.tool
+
+# The event stream
+curl -N http://localhost:8002/api/events/stream
 ```
 
-**The pre-flight validator** is the point of the service. It mirrors the simulator's
-validation order exactly, splits oversized requests into legal shipments, and explains
-every decision in operator-readable language. A randomised 40-request differential test
-against the live simulator proves that anything the validator approves the simulator
-accepts, and anything it rejects the simulator would have rejected with the same code.
+### 6.6 The demos
 
-See [`docs/BACKEND.md`](docs/BACKEND.md) for the full API contract, the validator rules,
-and the measured simulator semantics they encode.
-
----
-
-## 1c. The optimisation & intelligence layer
-
-On top of the validator sits the **optimiser** (what is *optimal* to dispatch over a
-multi-tick, multi-destination horizon, against *forecast* demand), a **demand forecast**,
-**anomaly detection**, and a **deterministic explanation layer**.
+Two repeatable scripts, each printing the exact commands **and** the expected
+observable output at every step:
 
 ```bash
-# Compute the optimal plan — READ-ONLY, writes nothing
-curl -s -X POST http://localhost:8002/api/optimize -H 'Content-Type: application/json' -d '{}'
-
-# Compute the plan AND execute only the current-tick shipments
-curl -s -X POST http://localhost:8002/api/optimize/execute -H 'Content-Type: application/json' -d '{}'
-
-# Which solver is active, and why
-curl -s http://localhost:8002/api/optimize/solver
-
-# The forecast for the current horizon
-curl -s http://localhost:8002/api/forecast
-
-# The forecast's own oracle: compare it against live /v1/demand-history
-curl -s http://localhost:8002/api/forecast/validate
-
-# Current anomalies, and their deterministic explanations
-curl -s http://localhost:8002/api/anomalies
-curl -s http://localhost:8002/api/anomalies/summary
-curl -s http://localhost:8002/api/incidents
+./scripts/demo-normal.sh                    # beats 1–8: normal operations
+./scripts/demo-crisis-fault-recovery.sh     # beats 9–14: crisis, fault, recovery
 ```
 
-Three properties are load-bearing:
+The second one injects a fault, shows the breaker trip, shows the console
+degrading to the cached world, clears the fault, and shows the breaker close
+**on its own**. It cleans up the fault on exit, even if interrupted.
 
-1. **The optimiser never trusts its own arithmetic for legality.** Every candidate
-   shipment is re-checked by `validate_and_plan` before it can reach the simulator. The
-   optimiser may be *conservative*, never *illegal*.
-2. **Only current-tick shipments are ever written.** The simulator stamps
-   `created_tick = now`, so writing a future-tick shipment early would consume the current
-   tick's dispatch cap. The plan is split into `shipments_now` (executable) and
-   `shipments_later` (advisory).
-3. **The language model is structurally incapable of being the decision authority.** The
-   optional prose layer is disabled by default, may not import the optimiser, validator,
-   state or journal (an AST test enforces this), receives only a finished immutable
-   explanation, and may return prose only — prose quoting an undeclared figure is
-   discarded.
+### 6.7 The Docker Desktop constraint
 
-The forecast is exact, not approximate: because the simulator's demand is deterministic
-(SHA-256-seeded), future demand is computable offline, and `GET /api/forecast/validate`
-reports `EXACT` against live `/v1/demand-history`.
+**This project's path contains spaces, and Docker Desktop cannot bind-mount
+it.** Every config file is therefore **baked into the image** rather than
+mounted, and the build context is the **project root**:
 
-Full detail: [`docs/BACKEND.md` Part II](docs/BACKEND.md).
+- The base stack bakes its code into images.
+- Prometheus's config is baked into `observability/Dockerfile.prometheus`.
+- Grafana's provisioning is baked into `observability/Dockerfile.grafana`.
 
----
+**Also note:** `docker compose build` does **not** recreate the running
+container. Always follow a build with `--force-recreate`.
 
-## 1d. The operator console
-
-The console is a fifth service on `:8003`. It renders the world the backend
-publishes and lets an operator act on the backend's recommendation — with a
-confirmation step, because a dispatch writes to the simulator.
-
-The screen is **one column, one hero, one panel at a time**: a slim status bar,
-a single action card carrying the plan and the dispatch button, and four tabs
-(Network, Forecast, Problems, System) with everything else one click away
-behind a disclosure. It has a **dark and a light theme**, toggled from the
-status bar and remembered across reloads.
-
-```bash
-# The console (serves the built assets and proxies /api to the backend)
-open http://localhost:8003
-
-# The console's own test suite, in the Dockerfile's `test` build target
-docker build --target test -t buetcsefest-frontend-test -f frontend/Dockerfile .
-docker run --rm buetcsefest-frontend-test
-
-# The live integration test — renders the whole console against the running backend
-cd frontend && LIVE_BACKEND=http://localhost:8002 npm test
-```
-
-It has one rule, and the rule is executable:
-
-> **Every number on screen is a number the backend sent, or a documented pure
-> derivation of numbers the backend sent.**
-
-`no-invented-numbers.test.tsx` scrapes every leaf element out of the rendered
-DOM, extracts every number, and checks each against an allow-list computed
-from the same shared derivation functions the components use. The live variant
-does the same against the running stack.
-
-Three other properties are worth stating:
-
-1. **A proxy, not CORS.** The browser talks to one origin. The console's server
-   pipes `/api/*` to the backend as a raw byte stream, so SSE stays live and the
-   backend's internal hostname never reaches the browser.
-2. **SSE is advisory.** An event triggers a REST re-read; the payload is never
-   rendered as world state. A dropped stream degrades to polling and the
-   status bar *says* so.
-3. **Dispatch takes two clicks.** The first arms the action and dispatches
-   nothing; the second confirms it.
-
-Full detail: [`docs/DASHBOARD.md`](docs/DASHBOARD.md).
-
----
-
-## 1e. Observability & resilience
-
-The platform reports on its own health while it works, and refuses work it
-cannot do safely.
-
-### The metrics
-
-`GET /metrics` — a hand-rolled Prometheus exposition, **zero new
-dependencies**:
-
-| Layer | The signal that matters |
-| :--- | :--- |
-| **Application** | request rate, latency histogram (p50/p95/p99), error rate, availability |
-| **System** | in-flight simulator reads, the read limit, **pool saturation**, queue depth |
-| **Intelligence** | forecast error, forecast verdicts, shortage alerts, decision frequency, **fallback activations** |
-| **Resilience** | circuit state, circuit transitions and rejections, broker mode, suspected SSE drops, snapshot age, DLQ size |
-
-PDF §15 names four layers — application, system, intelligence and **logs**.
-The first three are the first three rows above. The fourth row is a fifth
-group, **resilience**, which the brief does not list but which is where this
-platform's most important operational signal lives.
-
-**§15's fourth layer — logs — is covered by the backend's structured
-logging, not by a metric family**: a log line is not a metric, and a counter
-of log lines would be a number without meaning. The backend emits **60 log
-statements** across fourteen modules — every upstream failure with its exception
-class, every circuit transition, every dispatch and journal write.
-
-The labels use the **route template**, never the raw path — otherwise
-`/api/stations/station-mirpur` and `/api/stations/station-tongi` become two
-time series and the metric's cardinality explodes.
-
-### The health table
-
-`GET /api/health` carries PDF §16's table verbatim — Backend API, Database,
-Fuel Simulator, Prediction Service, Decision Engine — plus p95 latency, error
-rate, the circuit state and the broker state. It **always returns HTTP 200**:
-the container healthcheck must never kill the backend at the moment it should
-be serving the cached world.
-
-### The circuit breaker
-
-A breaker wraps the simulator client (it never edits it — the client must stay
-byte-identical to the verifier's reference copy). It converts a **13.75-second
-retry stall into a 1-millisecond rejection**.
-
-Only *retryable* failures trip it. A 409 from the simulator is a **business
-answer**, not an outage — tripping on it would take the whole backend down for
-one bad request.
-
-**Reads degrade; writes refuse.**
-
-| | Behaviour when the breaker is OPEN |
-| :--- | :--- |
-| `GET /api/state` | **200** with the last known good world and `degraded: true` |
-| `POST /api/plan` | **503** `CIRCUIT_OPEN` — a plan against a stale world would be a *wrong* plan |
-
-### Prove it, live
-
-```bash
-# Break the upstream
-curl -s -X POST http://localhost:8000/admin/faults \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"unavailable","duration_seconds":60}'
-
-sleep 20
-curl -s http://localhost:8002/api/health    # status: "degraded", circuit: OPEN
-curl -s http://localhost:8002/api/state     # 200, degraded: true
-curl -s http://localhost:8002/metrics | grep backend_circuit_state   # 2.0
-
-# Restore it — the breaker closes on its own, nothing polls, nothing nudges
-curl -s -X POST http://localhost:8000/admin/faults/clear
-```
-
-Full detail: [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md),
-[`docs/RESILIENCE.md`](docs/RESILIENCE.md).
-
-### The monitoring stack — opt-in
-
-Prometheus and Grafana live behind a **compose overlay**, not in the default
-stack. `docker compose up -d` still yields exactly **five** healthy services.
+### 6.8 The monitoring stack (opt-in)
 
 ```bash
 docker compose -f docker-compose.yml -f observability/compose.monitoring.yml up -d
-# Prometheus: http://localhost:9090    Grafana: http://localhost:3000
 ```
 
-Nine alert rules ship with it — pool saturation, circuit open, high latency,
-high error rate, suspected SSE drops, a non-empty DLQ and more. The Grafana
-dashboard is provisioned automatically, with one row per §15 layer.
-
-Full detail: [`observability/README.md`](observability/README.md).
-
----
-
-## 2. Exact terminal commands
-
-### 2.1 Start / stop the stack
-
-```bash
-# Start (build the verifier image on first run)
-docker compose up -d --build
-
-# Follow logs
-docker compose logs -f
-
-# Stop and remove containers
-docker compose down
-
-# Stop and also remove the named volume (discards cached snapshots + reports)
-docker compose down -v
-```
-
-### 2.2 Confirm the services are up
-
-```bash
-# Container status (all should read "healthy")
-docker compose ps
-
-# Simulator liveness (bypasses fault injection)
-curl -s http://localhost:8000/v1/health
-
-# Redis
-docker compose exec -T redis redis-cli ping
-
-# Verifier sidecar liveness
-curl -s http://localhost:8001/health
-
-# Backend liveness
-curl -s http://localhost:8002/api/health
-```
-
-### 2.3 Run the verification suite
-
-```bash
-# In-container (recommended: talks to simulator-api and redis over the compose network)
-docker compose exec -T client-verifier \
-  python verify_simulator.py \
-    --base-url http://simulator-api:8000 \
-    --redis-url redis://redis:6379/0 \
-    --json-report /app/reports/report.json
-
-# Over HTTP (returns the same report as JSON; 200 = all green, 500 = failures)
-curl -s -X POST http://localhost:8001/verify
-
-# On the host, against the published ports
-cd verifier
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python verify_simulator.py --base-url http://localhost:8000 --redis-url redis://localhost:6379
-```
-
-Useful flags:
-
-| Flag | Default | Meaning |
-| :--- | :--- | :--- |
-| `--base-url` | `http://simulator-api:8000` | Simulator base URL. |
-| `--redis-url` | `redis://redis:6379/0` | Redis URL for the cache layer. |
-| `--timeout` | `3.0` | Per-request HTTP timeout (seconds). |
-| `--max-retries` | `3` | Retry attempts for `503`/timeouts. |
-| `--json-report` | *(none)* | Write a machine-readable JSON report. |
-| `-v`, `--verbose` | off | Debug logging. |
-
-Exit code is `0` when every check passes, `1` otherwise — so it drops straight
-into CI.
-
-### 2.4 Useful simulator commands while developing
-
-```bash
-# The simulator's own HTML dashboard (auto-refreshes every 2s)
-open http://localhost:8000/admin
-
-# Swagger / ReDoc
-open http://localhost:8000/docs
-open http://localhost:8000/redoc
-
-# Reset to the pristine baseline scenario
-curl -s -X POST http://localhost:8000/admin/reset
-
-# Advance exactly one tick (deterministic)
-curl -s -X POST http://localhost:8000/admin/step
-
-# Run / pause the background ticker
-curl -s -X POST http://localhost:8000/admin/run
-curl -s -X POST http://localhost:8000/admin/pause
-
-# Inject a crisis event
-curl -s -X POST http://localhost:8000/admin/events \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"route_disruption","start_tick":0,"duration_ticks":10,
-       "parameters":{"route_ids":["route-gazipur-mirpur"]}}'
-
-# Inject / clear API faults
-curl -s -X POST http://localhost:8000/admin/faults \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"stale_data","duration_seconds":60,"parameters":{}}'
-curl -s -X POST http://localhost:8000/admin/faults/clear
-
-# Audit log
-curl -s "http://localhost:8000/admin/audit?limit=20"
-```
-
-The simulator also has a **built-in web console** at
-`http://localhost:8000/admin` — dropdowns for both injection surfaces, a live
-audit pane, and one-click fault clearing.
-
-### 2.5 Testing by injection
-
-The commands above are the whole injection surface, but the *timing* is not
-obvious and getting it wrong produces confusing results. `docs/TESTING.md`
-documents the measured behaviour — including the `start_tick` off-by-one, which
-six domain events and five API faults do and do not raise an anomaly for, and
-why `stream_disconnect` does **not** tear down a live stream.
-
-The short version:
-
-```bash
-# Break a route that has no alternative, and watch the system notice
-curl -s -X POST http://localhost:8000/admin/events \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"route_disruption","start_tick":0,"duration_ticks":10,
-       "parameters":{"route_ids":["route-patiya-coxsbazar"]}}'
-
-curl -s -X POST http://localhost:8000/admin/run
-sleep 12
-
-curl -s http://localhost:8002/api/anomalies    # → ROUTE_BOTTLENECK, CRITICAL
-curl -s http://localhost:8002/api/metrics      # → kpis.disrupted_routes: 1
-```
-
-Two rules that will save you a debugging session:
-
-- **An event with `start_tick: N` activates on the tick *after* N** if you
-  inject it while the world already sits at tick N. Inject `N-1` for it to be
-  live at tick N.
-- **Reset the world before you test.** The baseline is well-stocked for its
-  first ~60 ticks, so an empty plan early on is *correct*, not a bug.
-
-### 2.6 The load test
-
-Three named workloads, measured. **k6** is the primary tool; a **stdlib-only
-Python harness** is the fallback, and both emit the **same JSON schema**, so
-the report is reproducible on a machine that has neither.
-
-```bash
-./loadtest/run.sh --duration 60 --vus 20       # picks k6 if present
-./loadtest/run.sh --duration 60 --vus 20 --python  # force the fallback
-```
-
-The report lands in `loadtest/results/<timestamp>.json`:
-
-```json
-{
-  "schema_version": 1,
-  "started_at": "...", "duration_seconds": 60, "vus": 20,
-  "scenarios": [
-    {"name": "W1-decision", "requests": 1377, "error_rate": 0.0,
-     "latency_ms": {"avg": 209.0, "p50": 202.3, "p95": 249.3, "p99": 269.3},
-     "throughput_rps": 45.5,
-     "resource": {"cpu_pct": 0.47, "mem_mb": 51.5}}
-  ],
-  "backend_metrics_snapshot": {"pool_saturation_peak": 1.0, "circuit_state": "CLOSED"}
-}
-```
-
-The `backend_metrics_snapshot` is the point: the report reads the backend's
-own `/metrics` before and after the run, so the numbers tie request latency to
-**simulator pool saturation**. That is the finding PDF §18 is asking for —
-understanding the system's limits, not a benchmark number.
-
-Measured results and their interpretation:
-[`docs/LOAD_TEST.md`](docs/LOAD_TEST.md).
-
-### 2.7 The one command
-
-```bash
-./scripts/verify-all.sh                      # human-readable
-./scripts/verify-all.sh --json out.json      # machine-parseable
-```
-
-It runs, in order: the **49-check verifier suite**, the **backend pytest
-suite**, the **frontend test suite**, the **load test**, and the
-**observability self-check** (which asserts every required metric family is
-present and that `/api/health` carries §16's fields). Output is one JSON
-object with per-suite pass/fail, counts and durations. Exit code `0` only if
-everything passed.
-
-### 2.8 The demo
-
-Two scripts run the whole 14-beat story, so the demo is repeatable and never
-memorised. Each beat prints the exact command **and** the output a judge
-should see, then runs it.
-
-```bash
-./scripts/demo-normal.sh                    # beats 1–8
-./scripts/demo-crisis-fault-recovery.sh     # beats 9–14
-./scripts/demo-normal.sh --narrate          # print the commands only
-```
-
-Full detail: [`docs/DEMO.md`](docs/DEMO.md).
-
----
-
-## 3. What the suite verifies
-
-Six sequential groups, 49 individual assertions.
-
-### 1. Health & baseline topology
-- `POST /admin/reset` returns a clean instance (`tick=0`, `status=PAUSED`,
-  `scenario=baseline`, `seed=12345`).
-- `GET /v1/health` returns `status: "ok"`.
-- Exact world topology: **2 regions, 2 depots, 4 stations, 6 routes, 22
-  scheduled supply arrivals**.
-- Every baseline entity id matches the documented scenario, and every route
-  connects a valid depot to a valid station.
-- `GET /v1/demand-history?limit=100` returns a bounded list.
-
-### 2. Deterministic tick & SSE
-- `POST /admin/step` advances exactly one tick.
-- `GET /v1/stream` delivers a `simulation.tick` event with `tick` + `sim_time`.
-- The SSE event triggers an **immediate REST re-fetch** (SSE is advisory only).
-- `: connected` / `: keepalive` comments are ignored, never parsed as events.
-- `GET /v1/instance` confirms the tick increment; repeated steps are monotonic.
-
-### 3. Allocation lifecycle & idempotency
-- `POST /v1/allocations` → `201 Created`, `PENDING`.
-- Replaying the same key + body is **idempotent** (same allocation id).
-- Same key + different body → `409 IDEMPOTENCY_KEY_MISMATCH`.
-- `PENDING → IN_TRANSIT → ARRIVED` across ticks; station inventory updates.
-- Cancelling a departed allocation → `409 CANNOT_CANCEL`.
-- Cancelling an unknown id → `404`.
-- Cancelling a `PENDING` allocation succeeds (`CANCELLED`).
-- A cancelled idempotency key **stays permanently occupied**.
-
-### 4. Constraint & error validation
-- Quantity above `route.max_shipment` → `409 ROUTE_CAPACITY_EXCEEDED`.
-- Route connecting different endpoints → `409 ROUTE_MISMATCH`.
-- Unknown route id → `404 NOT_FOUND`.
-- Invalid `fuel_type` enum → `422`.
-- `quantity <= 0` → `422`.
-
-### 5. Crisis & fault resilience
-- `POST /admin/events` injects a `route_disruption`; the route flips to
-  `DISRUPTED` and allocations against it are rejected with
-  `409 ROUTE_DISRUPTED`.
-- The `stale_data` fault sets `X-Simulator-Stale: true` on `/v1/*` GETs and
-  triggers an **immediate Redis cache invalidation**.
-- `GET /v1/health` and all `/admin/*` paths **bypass fault injection**.
-- The `unavailable` fault produces `503 FAULT_INJECTED`, which is retried with
-  **exponential backoff** and then surfaced cleanly.
-- The `stream_disconnect` fault makes `GET /v1/stream` return `503`; the
-  listener backs off and reconnects.
-- `POST /admin/faults/clear` restores full service.
-
-### 6. Final audit & metrics summary
-- `GET /v1/metrics` returns a coherent summary (`service_level` in `[0, 1]`).
-- `GET /admin/audit?limit=20` returns the audit trail.
-- The audit log records `allocation.created` and `simulation.tick`.
-- The simulator is healthy and the instance is reachable at the end.
-
----
-
-## 4. Design notes
-
-### 4.1 The client is defensive by construction
-
-`simulator_client.py` encodes the integration rules rather than assuming them:
-
-- **REST is the source of truth; SSE is advisory.** `StreamListener` maps each
-  event type to the resources it affects (`simulation.tick` → instance,
-  metrics, depots, stations, allocations, supply-arrivals; …) and re-fetches
-  them over REST the moment an event arrives. The event payload is never
-  trusted as world state.
-- **Stale detection.** Every `GET /v1/*` response is inspected for
-  `X-Simulator-Stale: true` (inside `_request`, so it applies to *all* read
-  paths, not just the cached ones). On a hit the whole `sim:*` Redis namespace
-  is flushed and a warning is logged.
-- **Backoff + jitter.** `503 FAULT_INJECTED` and transport timeouts are
-  retried with exponential backoff and full jitter (capped at 4 s) under a
-  hard 3 s per-request timeout. Retries stop once the attempt budget is spent
-  and the error is surfaced as a typed exception.
-- **Typed error taxonomy.** Domain `409`s raise `SimulatorConflict` carrying
-  the exact code (`ROUTE_CAPACITY_EXCEEDED`, `IDEMPOTENCY_KEY_MISMATCH`, …);
-  `404` raises `SimulatorNotFound`; `422` raises `SimulatorValidationError`;
-  injected faults raise `SimulatorFaultInjected`.
-- **Cache safety.** Only genuinely static resources (`/v1/regions`) are served
-  from Redis. Everything that moves with the world is fetched fresh, and every
-  mutation invalidates the namespace — otherwise a cached snapshot would
-  silently contradict the simulator.
-
-### 4.2 Two places where the guide and the task brief differ
-
-Both were resolved **in favour of the live simulator**, which was measured
-directly rather than assumed:
-
-1. **Idempotent replay returns `201`, not `200`.** The guide states: *"Same
-   key, same body → return existing allocation (HTTP 201, not 200)."* The
-   client accepts `200` or `201` and detects a replay by tracking the highest
-   allocation id seen, because the status code alone cannot distinguish a new
-   allocation from a replay.
-
-2. **Arrival takes `transit_ticks + 1` steps.** A shipment created on tick *N*
-   departs on tick *N* and is scheduled to arrive on tick *N + transit_ticks*,
-   but the arrival is **applied** when the counter advances past that tick.
-   So `route-gazipur-mirpur` (`transit_ticks=2`) reaches `ARRIVED` three
-   steps after creation, not two. The suite steps until `ARRIVED` (bounded to
-   8 iterations) instead of hard-coding a count.
-
-A third difference worth noting: the guide's fast-start snippet shows
-`SIMULATION_SPEED: 15` / `TICK_MINUTES: 8`, which are swapped relative to the
-documented defaults. `docker-compose.yml` uses the real semantics —
-`SIMULATION_SPEED` (wall-clock ticks/second while running) and
-`TICK_MINUTES=15` (simulated minutes per tick), matching the domain model's
-"15-minute tick clock".
-
-### 4.2a The tick clock: one tick every 10 real seconds
-
-`SIMULATION_SPEED=0.1` gives **one tick every 10 real seconds**, and each tick
-advances the simulated clock by 15 minutes. So the console shows a quarter-hour
-of supply-chain activity roughly every ten seconds.
-
-**10 seconds is the slowest this simulator can go.** Its runner sleeps
-
-```python
-await asyncio.sleep(max(0.05, 1.0 / max(0.1, settings.simulation_speed)))
-```
-
-The inner `max(0.1, ...)` floors the divisor at `0.1`, which floors the interval
-at **10 seconds** no matter how small the speed is set. A 15-second tick is
-therefore not expressible in this simulator version — 10s is the closest
-reachable value. (At the previous `SIMULATION_SPEED=8` the world advanced a
-full simulated day every 12 real seconds, which is far too fast to read.)
-
-Two backend timings were retuned to match, because both were calibrated
-against a fast-ticking world:
-
-| Setting | Was | Now | Why |
-| :--- | :--- | :--- | :--- |
-| `SSE_STALE_AFTER` | `20` | `45` | Events arrive once per tick, so a 20s threshold left only 10s of slack over a 10s tick — it would fire on a healthy but slow world. 45s is ~4 ticks of slack. |
-| `POLL_INTERVAL` | `2` | `5` | Polling twice a second read the same snapshot over and over. Half the tick interval is enough to keep a fresh snapshot without polling faster than the world changes. |
-| `POLL_MS` (console) | `4000` | `5000` | Same reasoning on the console side. The SSE stream nudges it the instant a tick lands; the poll is the safety net for a dropped stream. |
-
-### 4.3 The backend owns one SSE subscription, and detects drops by tick progress
-
-The simulator's SSE endpoint has a **silent failure mode**: each subscriber gets its own
-`asyncio.Queue(maxsize=200)`, and when that queue overflows the simulator drops the
-subscriber from its set but **leaves the HTTP connection open** — permanently silent, no
-events and no keepalives. The connection looks healthy; the simulator stays healthy.
-
-A paused simulator is *also* silent, so "have I seen a frame recently?" cannot distinguish
-the two. The backend therefore measures **tick progress**: the watchdog polls
-`/v1/instance`, and if the tick advanced while no event arrived for 20 s, the subscription
-is presumed dead and is replaced. A REST poller runs at all times, so a drop degrades
-*freshness*, never correctness.
-
-The backend also tracks **reachability separately from event delivery**. A short-lived SSE
-probe reports whether the simulator will accept a subscription, so a healthy-but-paused
-stream is not misreported as broken. Full details in [`docs/BACKEND.md`](docs/BACKEND.md).
-
-### 4.4 The validator mirrors the simulator's validation *order*
-
-The simulator applies its capacity limits in a **fixed order** and reports the *first* one
-that fails — not the numerically smallest. A 7500 L request against a route limited to 7000 L
-and a station with 6000 L free is rejected with `ROUTE_CAPACITY_EXCEEDED`, **not**
-`DESTINATION_CAPACITY_EXCEEDED`.
-
-The validator encodes this order explicitly, so the operator is told the true reason for a
-rejection. This was caught by the randomised differential test against the live simulator,
-not assumed from the guide.
-
-### 4.5 The optimiser is gated by the validator, and the forecast is exact
-
-The optimiser decides what is *optimal*; the validator decides what is *legal*. They are
-kept strictly separate, and every candidate shipment the optimiser emits is re-checked by
-`validate_and_plan` before it can reach the simulator. This preserves the property that
-makes the validator a usable test oracle: it is never stricter than the simulator.
-
-The forecast is **exact rather than approximate**. The simulator's demand is generated
-from a SHA-256-seeded RNG, so the formula is reproducible offline:
-
-```
-demand(station, fuel, tick) = max(0, base · hour_factor · region_factor · multiplier · jitter)
-```
-
-Measured **60/60 exact match** against live `/v1/demand-history`, and exposed as an
-endpoint — `GET /api/forecast/validate` — so a judge can check it themselves.
-
-Two measured facts constrain the forecast, and both contradict the integration guide:
-
-* **`demand_multiplier` is transient.** It reverts to `1.0` when a `demand_spike` event
-  resolves. Caching it would make the forecast 80% wrong for exactly the window where it
-  matters most, so it is re-read from `/v1/stations` every cycle.
-* **Arrival is one tick later than the simulator's own field suggests.** Fuel is credited at
-  `created_tick + transit_ticks + 1`, and supply arrivals at `planned_tick + 1`. The
-  projection model uses the measured lag, not the advertised one.
-
-### 4.6 The LP is written out, measured, and deliberately not installed
-
-`backend/app/lp_solver.py` contains the full C1–C10 linear formulation — judges score
-optimisation depth — and is import-guarded so the backend starts fine without it.
-
-Measured on the baseline network:
-
-| Solver | Service level | Shipments |
-| :--- | ---: | ---: |
-| greedy | 0.915702 | 3 |
-| LP | 0.915702 | 39 |
-
-Identical service level, **13× the shipments** — and every shipment costs an idempotency
-key and a slice of the depot's per-tick dispatch cap. The rule was *enable the LP only if
-it is measurably better*; it is not, so `pulp` stays out of `requirements.txt` and the image
-keeps no native binary. `tests/test_lp_solver.py` pins this measurement, so if a future
-change makes the LP win by more than 1%, the test fails and the question is re-asked.
-
-### 4.7 Environment variables
-
-
-`docker-compose.yml` reads these from the host environment, with the values
-below as defaults:
-
-| Variable | Default | Meaning |
-| :--- | :--- | :--- |
-| `SIMULATION_SPEED` | `0.1` | Wall-clock ticks per second while running. `0.1` = one tick every 10 seconds — the slowest this simulator version allows. |
-| `TICK_MINUTES` | `15` | Simulated minutes advanced per tick. |
-| `SIMULATOR_START_MODE` | `paused` | `paused` or `running`. |
-
-Override them inline:
-
-```bash
-SIMULATION_SPEED=0.1 TICK_MINUTES=15 SIMULATOR_START_MODE=running docker compose up -d
-```
-
-> `SIMULATOR_START_MODE=paused` is the default so the test suites can drive
-> ticks deterministically via `POST /admin/step`. To watch the console against
-> a live world, start the stack as above and then run
-> `curl -X POST http://localhost:8000/admin/run`.
-
-The **backend** reads its own settings from the environment too:
-
-| Variable | Default | Meaning |
-| :--- | :--- | :--- |
-| `BREAKER_FAILURE_THRESHOLD` | `5` | Consecutive *retryable* failures that open the circuit. |
-| `BREAKER_COOLDOWN_SECONDS` | `15.0` | How long the breaker waits before probing the upstream. |
-| `SCENARIO_PATH` | `backend/scenarios/baseline.yaml` | Which scenario configuration to load. |
-
-A **terminal** failure — a 404, 409 or 422 from the simulator — never counts
-toward the threshold. Those are the simulator *answering*, not the simulator
-failing, and tripping on them would take the backend down for one bad request.
-
----
-
-## 5. Files
-
-```
-.
-├── docker-compose.yml            # simulator-api + redis + client-verifier + backend + frontend
-├── README.md
-├── docs/
-│   ├── BACKEND.md                 # backend API contract, validator rules, measured semantics
-│   │                              #   + Part II: optimiser, forecast, anomalies, explanation
-│   │                              #   + Part III: observability, resilience, scenario config
-│   ├── DASHBOARD.md               # the operator console: architecture, invariant, panels
-│   ├── ARCHITECTURE.md            # the as-built diagram (PDF §20 item 6)
-│   ├── OBSERVABILITY.md           # the metric catalogue, the health table, the §15 layers
-│   ├── RESILIENCE.md              # the breaker's state machine, the degraded-mode contract
-│   ├── LOAD_TEST.md               # the workloads, the measured results, their interpretation
-│   ├── SCENARIO.md                # the scenario configuration schema
-│   ├── DEMO.md                    # the 14-beat live demo script
-│   ├── BRIEF.md
-│   ├── SYSTEM_DESIGN.md
-│   └── system_understanding_and_requirements.md
-├── regular_updates/
-│   ├── Day_1.md                   # harness design
-│   ├── Day_2.md                   # 49-check verification suite
-│   ├── Day_3.md                   # operator backend + validator
-│   ├── Day_4.md                   # optimiser + forecast + anomalies + explanation
-│   ├── Day_5.md                   # operator console + the connection-pool incident
-│   └── Day_6.md                   # observability + resilience + load testing
-├── scripts/
-│   ├── verify-all.sh              # THE one command — five suites, one JSON verdict
-│   ├── check_observability.py     # asserts every required metric family is present
-│   ├── demo-normal.sh             # demo beats 1–8
-│   └── demo-crisis-fault-recovery.sh  # demo beats 9–14
-├── loadtest/
-│   ├── run.sh                     # picks k6, falls back to the Python harness
-│   ├── harness.py                 # stdlib-only fallback runner (same JSON schema)
-│   ├── k6/                        # decision.js, dashboard.js, console-mix.js
-│   └── results/                   # the committed reports
-├── observability/                 # the OPT-IN monitoring overlay (not a default service)
-│   ├── compose.monitoring.yml     # Prometheus + Grafana, one command away
-│   ├── prometheus.yml             # the scrape config
-│   ├── prometheus-alerts.yml      # nine alert rules
-│   ├── grafana-dashboard.json     # one row per §15 layer
-│   ├── grafana-provisioning/      # datasource + dashboard providers
-│   └── README.md
-├── verifier/
-│   ├── Dockerfile                 # python:3.11-slim, deps first, healthcheck
-│   ├── requirements.txt           # fastapi, httpx, pydantic, redis, pytest
-│   ├── simulator_client.py        # defensive async client (typed models, SSE, admin)
-│   ├── verify_simulator.py        # 49-check end-to-end verification suite
-│   └── verify_api.py              # FastAPI sidecar: GET /health, POST /verify
-└── backend/
-    ├── Dockerfile                 # python:3.11-slim, deps first, healthcheck
-    ├── requirements.txt           # fastapi, uvicorn, httpx, pydantic, redis, pytest
-    ├── scenarios/
-    │   └── baseline.yaml          # the scenario configuration — validated at boot
-    ├── app/
-    │   ├── main.py                # FastAPI app, lifespan, router wiring
-    │   ├── broker.py              # SSE broker: fan-out, watchdog, probe, polling fallback
-    │   ├── validator.py           # PRE-FLIGHT VALIDATOR (pure, no I/O)
-    │   ├── forecast.py            # demand forecast + projection + stockout risk (pure)
-    │   ├── optimizer.py           # multi-tick optimiser, greedy (pure)
-    │   ├── lp_solver.py           # optional LP formulation, import-guarded
-    │   ├── dispatch.py            # gate_plan + execute_shipments (shared write path)
-    │   ├── anomaly.py             # anomaly detectors (pure)
-    │   ├── explain.py             # deterministic explanation layer (pure)
-    │   ├── llm.py                 # optional decorative prose layer (isolated, off by default)
-    │   ├── state.py               # WorldSnapshot + TTL'd cache + ObservationLog
-    │   ├── models.py              # request/response schemas
-    │   ├── config.py              # env-driven settings
-    │   ├── errors.py              # simulator exception -> HTTP mapping
-    │   ├── keys.py                # deterministic idempotency keys (+ make_key_at)
-    │   ├── journal.py             # write-ahead dispatch journal + dispatch_plans
-    │   ├── circuit_breaker.py     # the breaker + the degraded-mode contract
-    │   ├── metrics.py             # the Prometheus writer + the HTTP middleware
-    │   ├── dlq.py                 # the dead-letter queue
-    │   ├── scenario.py            # the scenario loader + the boot-time validator
-    │   ├── simulator_client.py    # byte-identical copy of verifier/simulator_client.py
-    │   └── routers/
-    │       ├── health.py          # /api/health, /api/stream-health
-    │       ├── state.py           # /api/state, /api/depots, /api/stations, ...
-    │       ├── events.py          # /api/events/recent, /api/events/stream
-    │       ├── allocations.py     # /api/plan, /api/allocations, .../cancel, .../explain
-    │       ├── optimizer.py       # /api/optimize, .../execute, .../solver, .../llm
-    │       ├── forecast.py        # /api/forecast, .../summary, .../{id}, .../validate
-    │       ├── anomaly.py         # /api/anomalies, /api/incidents, .../explain
-    │       ├── observability.py   # /metrics, /api/observability
-    │       └── dlq.py             # /api/dlq, /api/dlq/{id}/retry
-    └── tests/
-        ├── test_validator.py                      # pure unit tests, no simulator
-        ├── test_validator_against_simulator.py   # oracle + randomised differential test
-        ├── test_broker.py                         # fan-out, watchdog, reachability probe
-        ├── test_api.py                            # HTTP surface
-        ├── test_client_parity.py                  # drift guard
-        ├── test_forecast.py                       # forecast unit tests + golden fixture oracle
-        ├── test_optimizer.py                      # constraint + determinism properties
-        │                                          #   + never worse than the naive baseline
-        ├── test_optimizer_against_simulator.py    # the live simulator as oracle
-        ├── test_optimizer_api.py                  # optimiser HTTP surface
-        ├── test_forecast_api.py                   # forecast HTTP surface + validate oracle
-        ├── test_anomaly.py                        # detector properties
-        ├── test_anomaly_api.py                    # anomaly HTTP surface
-        ├── test_explain.py                        # determinism + "every number is declared"
-        ├── test_llm_isolation.py                  # AST import-graph guard
-        ├── test_lp_solver.py                      # import guard, fallback, LP-vs-greedy
-        ├── test_circuit_breaker.py                # the state machine + degraded mode
-        ├── test_metrics.py                        # the exposition format + the metric families
-        ├── test_pool_saturation.py                # the semaphore bound is never exceeded
-        ├── test_dlq.py                            # a bad frame is quarantined, not raised
-        ├── test_scenario_config.py                # the YAML loads, validates, changes nothing
-        ├── test_observability_api.py              # the §16 table on /api/health
-        └── fixtures/
-            └── demand_golden.json                 # 60-row live golden fixture
-└── frontend/
-    ├── Dockerfile                 # node:22-alpine, two-stage build, no runtime deps
-    ├── server.mjs                 # /api proxy (raw byte stream) + static server
-    ├── vite.config.ts             # dev proxy + test config
-    ├── package.json
-    ├── src/
-    │   ├── App.tsx                # the focus + drill-down layout
-    │   ├── api/
-    │   │   ├── types.ts           # hand-written types mirroring the backend
-    │   │   └── client.ts          # the only place that talks to the backend
-    │   ├── lib/
-    │   │   ├── format.ts          # rendering only — never derives
-    │   │   ├── derive.ts          # the pure derivations — the only place a number is born
-    │   │   ├── useTheme.ts        # the dark/light preference, persisted
-    │   │   └── useBackend.ts      # the world hook: SSE (advisory) + polling fallback
-    │   ├── components/
-    │   │   ├── common.tsx         # Panel, Badge, Dot, Stat, Meter, Empty, ErrorBox
-    │   │   ├── StatusBar.tsx      # the slim top bar + the theme toggle
-    │   │   ├── ActionCard.tsx     # the hero: the plan, the why, the two-step dispatch
-    │   │   ├── DetailTabs.tsx     # the tab strip — one panel at a time
-    │   │   ├── Disclosure.tsx     # the reusable expander
-    │   │   ├── TelemetryBar.tsx   # StaleBanner (the freshness contract)
-    │   │   ├── NetworkPanel.tsx   # DepotPanel, StationPanel, RoutePanel
-    │   │   ├── ForecastPanel.tsx  # the merged forecast tab
-    │   │   ├── AnomalyPanel.tsx   # AnomalyPanel, IncidentPanel
-    │   │   └── SystemPanel.tsx    # the §16 health table + the pool-saturation meter
-    │   └── test/
-    │       ├── derive.test.ts             # the pure derivations
-    │       ├── format.test.ts             # the formatting
-    │       ├── panels.test.tsx            # every panel, against real payloads
-    │       ├── stream.test.ts             # SSE is advisory; drop degrades; reconnect works
-    │       ├── no-invented-numbers.test.tsx  # THE invariant
-    │       ├── theme.test.ts              # the toggle, the persistence, the fallbacks
-    │       ├── live.test.tsx              # the same, against the running stack
-    │       └── fixtures.ts                # real backend payloads, copied verbatim
-```
-
----
-
-## 6. Troubleshooting
-
-| Symptom | Cause / fix |
+| Service | URL |
 | :--- | :--- |
-| `client-verifier` keeps restarting | The image is stale. Run `docker compose up -d --build client-verifier`. |
-| `error while creating mount source path` | A host bind-mount of `./verifier` was used. This setup copies the code into the image instead, so no bind-mount is required. |
-| `platform (linux/amd64) does not match ... linux/arm64` | Harmless — the simulator image is amd64 and Docker emulates it. |
-| Checks fail with stale tick values | The simulator was left running. `POST /admin/reset` before the suite (the suite does this itself). |
-| Port 8000 already in use | Another simulator instance is running. `docker compose down` first. |
-| Redis warnings in the log | The cache is optional; the client degrades to cache-less operation and still passes every check. |
-| `backend` reports `mode: "polling"` while the simulator is healthy | The simulator is **paused**, so no events flow. Check `sse_reachable` in `/api/stream-health` — if it is `true`, SSE is fine and the world is simply quiet. |
-| `backend` tests skip the async cases | `pytest-asyncio` is missing. Run the suite **inside the container**: `docker compose exec -T backend pytest tests/ -q`. |
-| `simulator-api` is `healthy` but every request hangs | The simulator's connection pool is exhausted. `docker compose restart simulator-api` clears it; `docs/BACKEND.md` §18 explains the cause and the fix. |
-| The console shows "Upstream unreachable" | The backend cannot reach the simulator. Check `curl localhost:8002/api/health` — its `upstream.reachable` field says why. |
-| The console's live test times out | The backend is slow or the simulator is wedged. Check `docker compose ps` first. |
-| `/api/health` says `degraded` and `circuit.state` is `OPEN` | The breaker tripped. It closes on its own after `BREAKER_COOLDOWN_SECONDS`. If the upstream is genuinely down, check `curl localhost:8000/v1/health`. |
-| `POST /api/plan` returns `503 CIRCUIT_OPEN` | **Working as designed.** The write path refuses to plan against a stale world; reads still serve the last known good snapshot with `degraded: true`. See `docs/RESILIENCE.md`. |
-| `curl /metrics` returns JSON, not Prometheus text | You asked for `/api/observability` or `/api/metrics`. `/metrics` is the bare path and returns `text/plain; version=0.0.4`. |
-| Prometheus shows the backend target `down` | The scrape config expects the service name `backend` on port 8002. Start the overlay with the default compose file so the network name matches: `docker compose -f docker-compose.yml -f observability/compose.monitoring.yml up -d`. |
-| `docker compose build` did not change the running container | `build` does not recreate. Always follow it with `--force-recreate`. |
-| The load test reports 100% errors | The backend was not running, or the breaker was OPEN. Check `curl localhost:8002/api/health` first. |
+| Prometheus | <http://localhost:9090> |
+| Grafana | <http://localhost:3000> — anonymous admin, no login |
+
+The Grafana dashboard is **"Fuel Supply Intelligence — Platform Observability"**,
+in the `BUET CSE Fest` folder: four rows, nineteen panels. Prometheus carries
+**nine alert rules** (pool saturation, circuit open, high latency, high error
+rate, suspected stream drops, probe failures, non-empty DLQ, …).
+
+### 6.9 Load testing
+
+```bash
+./loadtest/run.sh --duration 60 --vus 20
+```
+
+k6 if installed, otherwise the stdlib-only Python harness — **both emit the
+identical JSON schema**. The report lands in `loadtest/results/<timestamp>.json`
+and carries avg / p50 / p95 / p99, throughput, error rate, concurrency, the
+backend container's CPU and memory, **and a `backend_metrics_snapshot` tying
+request latency to pool saturation**. That snapshot is the point: the PDF asks
+for "understanding the behavior and limits of the implemented system rather
+than achieving an arbitrary benchmark".
+
+### 6.10 The measured results
+
+From `loadtest/results/20261126T003154Z.json` — 30 s, 10 VUs, three scenarios:
+
+| Scenario | Requests | p50 | p95 | p99 | Throughput | Errors | Pool saturation (peak) |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **W1** — `POST /api/optimize` | 1,166 | 198 ms | 262 ms | 294 ms | 38.5 rps | 0.0% | **1.00** |
+| **W2** — `GET /api/stations` | 5,297 | 3 ms | 7 ms | 16 ms | 176.3 rps | 0.0% | 0.00 |
+| **W3** — the console mix | 4,864 | 6 ms | 18 ms | 31 ms | 151.7 rps | 0.0% | 0.00 |
+
+**The mechanism is visible in the table.** The decision path saturates the
+pool and pays for it in latency; the read paths are served from the cached
+snapshot and never touch the pool at all. That is the design working, and the
+numbers say so:
+
+- **W1's saturation peak of 1.00 is the semaphore working.** The bound was
+  reached and never exceeded — `backend/tests/test_pool_saturation.py`
+  asserts the gauge can never exceed 1.0.
+- **W2 and W3's zero saturation is the snapshot cache working.** The console
+  polls every 5 s and the simulator is barely touched.
+- **Zero errors across all three scenarios**, with the circuit `CLOSED`
+  throughout.
+
+The pattern **reproduces**: an earlier run (`20261125T193715Z.json`, 12 VUs)
+gave the same shape — W1 saturation 1.00 / mean 0.64, W2 and W3 at 0.00 —
+with W1's p50 at 202 ms. The numbers move with the machine; the *shape* does
+not. That is the point of the report.
 
 ---
 
-## 7. The documentation set
+## 7. How it is verified
 
-| Document | What it answers |
+### 7.1 The three gates
+
+| Gate | What it proves | Current |
+| :--- | :--- | :---: |
+| `verifier/verify_simulator.py` | The platform honours the simulator's contract — 49 checks across 6 groups | **49/49** |
+| `backend/tests/` | 25 files, 10,082 lines, including **two differential oracles against the live simulator** | **468 passed, 8 skipped** |
+| `frontend/src/test/` | 9 files, 2,127 lines, including the no-invented-numbers guarantee | **136 passed, 3 skipped** |
+
+**The verifier's 49 checks, by group:**
+
+| # | Group | Checks |
+| :---: | :--- | ---: |
+| 1 | Health & baseline topology | 10 |
+| 2 | Deterministic tick & SSE stream | 7 |
+| 3 | Allocation lifecycle & idempotency | 11 |
+| 4 | Constraint & error validation | 5 |
+| 5 | Crisis & fault resilience | 12 |
+| 6 | Final audit & metrics summary | 4 |
+| | **Total** | **49** |
+
+### 7.2 The tests that are not ordinary
+
+Four test files are worth knowing by name, because each one is a *differential
+oracle* rather than a unit test:
+
+| File | What it does |
 | :--- | :--- |
-| [`docs/BACKEND.md`](docs/BACKEND.md) | Every endpoint, the validator rules, the measured simulator semantics, the metrics, the breaker. |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The as-built diagram — PDF §20 item 6. |
-| [`docs/SYSTEM_DESIGN.md`](docs/SYSTEM_DESIGN.md) | The design as built, and an honest list of what is *not* built. |
-| [`docs/DASHBOARD.md`](docs/DASHBOARD.md) | The console: its invariant, its architecture, its panels. |
-| [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | The metric catalogue, the §15 layers, the §16 health table. |
-| [`docs/RESILIENCE.md`](docs/RESILIENCE.md) | The breaker's state machine, the degraded-mode contract, the measured recovery timeline. |
-| [`docs/LOAD_TEST.md`](docs/LOAD_TEST.md) | The workloads, the measured results, and what they say about the system's limits. |
-| [`docs/SCENARIO.md`](docs/SCENARIO.md) | The scenario configuration schema and how to make a new one. |
-| [`docs/DEMO.md`](docs/DEMO.md) | The 14-beat live demo script. |
-| [`docs/BRIEF.md`](docs/BRIEF.md) | What is implemented, what is not, and why — in plain words. |
-| [`docs/TESTING.md`](docs/TESTING.md) | The measured behaviour of every injection surface. |
-| [`observability/README.md`](observability/README.md) | Bringing up Prometheus + Grafana. |
+| `test_validator_against_simulator.py` | Fires real requests at the live simulator and asserts the backend predicts the same rejection code every time. |
+| `test_optimizer_against_simulator.py` | Runs the optimiser against the live simulator's own constraint model. |
+| `test_client_parity.py` | SHA-256 guard: `backend/app/simulator_client.py` must be byte-identical to `verifier/simulator_client.py`. |
+| `no-invented-numbers.test.tsx` | Every number on the console traces to the backend or to a shared derivation. |
+
+### 7.3 The observability self-check
+
+```bash
+./scripts/check_observability.py
+```
+
+**46 assertions** covering every §15 layer, the §16 table, the content type,
+and the label sets. It fails if a metric family disappears, if a required label
+goes missing, if the content type drifts, or if a component's state leaves the
+known set.
+
+### 7.4 The bugs this found
+
+Verification here is not ceremony. Nineteen defects were found by three
+independent fresh-eyes audits — each was a **green stack with something quietly
+wrong**. A sample:
+
+| Bug | What was wrong |
+| :--- | :--- |
+| The health endpoint reported `p95_seconds: 0.0` while serving 12,681 requests | The histogram read the empty label key instead of pooling |
+| `backend_shortage_alerts_total{severity="HIGH"}` moved with the viewer's polling rate | Counted per read instead of per detection |
+| `STATION_OUTAGE` was registered but never emitted; two other kinds were emitted but never registered | A hand-copied list of anomaly kinds, free to drift |
+| `backend_upstream_retries_total` rendered as a permanent zero | The client retries *below* the breaker's choke point, so the backend cannot see a retry — the metric was unmeasurable |
+| `backend_incidents_total` rendered with no sample lines | Never registered |
+| A rejected plan always answered 409 | An unknown station is 404 and a malformed request is 422 |
+
+Full list: `regular_updates/Day_6.md` §3.
+
+---
+
+## 8. Configuration
+
+**38 environment variables**, all with safe defaults, all set in
+`docker-compose.yml`. `backend/app/config.py:185-245`.
+
+### The ones that change behaviour most
+
+| Env var | Default | What it does |
+| :--- | :--- | :--- |
+| `SIMULATOR_BASE_URL` | `http://simulator-api:8000` | The upstream. |
+| `REQUEST_TIMEOUT` | `3.0` | Per-request timeout, seconds. |
+| `MAX_RETRIES` | `3` | Retry attempts (→ 4 total tries). |
+| `BREAKER_FAILURE_THRESHOLD` | `5` | Consecutive retryable failures before OPEN. |
+| `BREAKER_COOLDOWN_SECONDS` | `15.0` | OPEN → HALF_OPEN probe delay. |
+| `BREAKER_ENABLED` | `true` | Disable the breaker (it still counts). |
+| `FETCH_CONCURRENCY` | `4` | Concurrent world reads. **Do not raise past 4** — each simulator request holds 2 connections against a 15-wide pool. |
+| `STATE_MAX_AGE` | `15.0` | Snapshot TTL. **Must exceed `POLL_INTERVAL`** — this is exactly the bug that produced a red "Stale data" banner on a perfectly healthy system. |
+| `POLL_INTERVAL` | `5.0` | The poller's reconcile rate. |
+| `SSE_STALE_AFTER` | `45.0` | No event + world advanced → suspected drop. |
+| `SSE_RECOVER_AFTER` | `10.0` | Poll-only seconds before reclaiming SSE. |
+| `SSE_MAX_LIFETIME` | `900.0` | Forced fresh SSE subscription. |
+| `SUBSCRIBER_QUEUE` | `64` | Per-dashboard queue depth. |
+| `OPTIMIZER_HORIZON_TICKS` | `16` | Planning horizon (16 ticks = 4 hours). |
+| `OPTIMIZER_SOLVER` | `auto` | `greedy` \| `lp` \| `auto`. |
+| `FORECAST_HORIZON_TICKS` | `16` | Forecast horizon. |
+| `SCENARIO_PATH` | `backend/scenarios/baseline.yaml` | The scenario file. **Read at import time** — must be set before the process starts. |
+| `DLQ_MAX_ENTRIES` | `1000` | DLQ cap; oldest evicted. |
+| `ANOMALY_HISTORY_WINDOW` | `32` | Ticks of history the detectors compare against. |
+
+Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`, case-insensitively.
+
+**The scenario file** (`backend/scenarios/baseline.yaml`, 70 lines): scenario
+name, seed, start time, tick minutes, four demand profiles, two region
+factors. Resolution order: `SCENARIO_PATH` → the packaged file → built-in
+defaults, so the backend still boots if the file is missing. Schema and how to
+derive a new scenario: `docs/SCENARIO.md`.
+
+---
+
+## 9. The API surface
+
+**42 routes** on the backend (`GET /openapi.json` lists them all), plus the
+verifier's own.
+
+### Health & observability
+
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/` | The service root. |
+| `GET` | `/api/health` | The PDF §16 health table. |
+| `GET` | `/api/stream-health` | Broker mode, SSE reachability, drop detection. |
+| `GET` | `/api/observability` | The JSON instrumentation mirror (the console's System tab). |
+| `GET` | `/metrics` | The Prometheus exposition. **Bare path.** |
+| `GET` | `/api/optimize/solver` | Which optimiser solver is active, and why. |
+| `GET` | `/api/optimize/llm` | The LLM prose layer's status (off by default). |
+
+### The world (read endpoints)
+
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/api/state` | The whole world snapshot. |
+| `GET` | `/api/stations`, `/api/stations/{station_id}` | Stations. |
+| `GET` | `/api/depots`, `/api/depots/{depot_id}` | Depots. |
+| `GET` | `/api/routes` | Routes. |
+| `GET` | `/api/supply-arrivals` | Inbound supply. |
+| `GET` | `/api/metrics` | The simulator's business KPIs (the console's original contract). |
+
+### Intelligence
+
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/api/forecast` | The forecast over the horizon. |
+| `GET` | `/api/forecast/summary` | The forecast, summarised for the console. |
+| `GET` | `/api/forecast/validate` | The forecast's oracle against live `demand-history`. |
+| `GET` | `/api/forecast/{station_id}` | One station's forecast. |
+| `GET` | `/api/anomalies`, `/api/anomalies/summary`, `/api/anomalies/{anomaly_id}` | Anomalies. |
+| `GET` | `/api/anomalies/{anomaly_id}/explain` | An anomaly's explanation. |
+| `GET` | `/api/incidents`, `/api/incidents/{incident_id}` | Grouped incidents. |
+
+### Decisions
+
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `POST` | `/api/plan` | Plan a shipment. **Read-only** — returns the plan *and* the reasoning. |
+| `POST` | `/api/optimize` | Optimise. **Read-only** — writes nothing. |
+| `POST` | `/api/optimize/execute` | Dispatch the current-tick shipments. Re-plans against a fresh snapshot first. |
+| `GET` | `/api/optimize/{plan_id}` | A stored plan. |
+| `GET` | `/api/allocations`, `/api/allocations/{allocation_id}` | Allocation history. |
+| `GET` | `/api/allocations/{allocation_id}/explain` | An allocation's explanation. |
+| `POST` | `/api/allocations` | Create an allocation. |
+| `POST` | `/api/allocations/{allocation_id}/cancel` | Cancel a PENDING allocation. |
+
+### Events & the DLQ
+
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/api/events` | The event feed. |
+| `GET` | `/api/events/recent` | The last N events (buffer 200). |
+| `GET` | `/api/events/stream` | The SSE stream the console subscribes to. |
+| `GET` | `/api/dlq`, `/api/dlq/{entry_id}` | The dead-letter queue. |
+| `POST` | `/api/dlq/{entry_id}/retry` | Replay a dead-lettered payload. |
+
+---
+
+## 10. Where to read next
+
+| Document | What it covers |
+| :--- | :--- |
+| `README.md` | Quick start, the operator commands, the observability walkthrough. |
+| `docs/ARCHITECTURE.md` | The as-built diagram, sequence diagrams, the data-flow table. |
+| `docs/BACKEND.md` | Every backend module, the event vocabulary, the configuration table. |
+| `docs/DASHBOARD.md` | The console, panel by panel. |
+| `docs/OBSERVABILITY.md` | The full metric catalogue, the alert rules, the pool-saturation signal. |
+| `docs/RESILIENCE.md` | The breaker's state machine, the degraded-mode contract, the measured recovery timeline. |
+| `docs/LOAD_TEST.md` | The workload definition, the report schema, the measured results. |
+| `docs/SCENARIO.md` | The scenario schema and how to derive a new one. |
+| `docs/DEMO.md` | The 14-beat demo narrative. |
+| `docs/SYSTEM_DESIGN.md` | The as-built design (rewritten to match the running product). |
+| `docs/BRIEF.md` | What the brief asked for, what is implemented, and what is not — and why. |
+| `regular_updates/Day_1.md` … `Day_6.md` | The build log, including the bugs found and the measured results. |
+
+---
+
+## A closing note
+
+The number to remember is not a benchmark. It is this:
+
+> **A platform that shows a number without saying how old it is, or why it is
+> the way it is, is not telling the operator anything.**
+
+Everything above — the exact forecast, the named rejection reason, the honest
+`degraded: true`, the count-once counters, the declared-numbers audit — follows
+from that one conviction. An operator acting on a fuel allocation is making a
+physical decision about the world. The software's job is not to look certain.
+It is to be **right, or to say clearly that it does not know.**
