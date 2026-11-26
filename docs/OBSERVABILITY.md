@@ -320,6 +320,10 @@ From `loadtest/results/20261125T193715Z.json`:
 | **W2** — `GET /api/stations` | 5 ms | 0.25 | 0.004 |
 | **W3** — the console mix | 5 ms | 0.00 | 0.00 |
 
+A second run (`20261126T003154Z.json`, 10 VUs) reproduced the same shape:
+W1 p50 198 ms at a saturation peak of **1.00**; W2 and W3 at 3 ms and 6 ms
+with a saturation peak of **0.00**.
+
 The mechanism is visible: the decision path saturates the pool and pays for
 it in latency; the read paths are served from the cached snapshot and never
 touch it at all. See `docs/LOAD_TEST.md`.
@@ -362,13 +366,40 @@ visible in log lines is not demonstrable.
 **§15's fourth layer — logs — is covered, but not by a metric family.** Logs
 are not metrics: a counter of "how many log lines" would be a number without
 meaning. The layer is covered by the backend's own structured logging —
-**57 log statements** across nine modules, at three levels:
+**60 log statements** across fourteen modules, at four levels (`warning`,
+`info`, `exception`, `debug`):
 
 | What §15 asks to be logged | Where |
 | :--- | :--- |
 | Integration failures | `simulator_client.py` (13 warnings) — every upstream failure is logged with the exception's class |
 | Decision events | `broker.py` (4 info), `dispatch.py`, `journal.py`, `main.py` |
 | Recoveries | `circuit_breaker.py` — every state transition, including the automatic close |
+| Quarantined payloads | `dlq.py` — every dead-lettered payload, with its reason |
+
+The full per-module breakdown:
+
+| Module | Statements | Levels |
+| :--- | ---: | :--- |
+| `broker.py` | 16 | 4 info, 10 warning, 2 debug |
+| `simulator_client.py` | 15 | 13 warning, 2 info |
+| `main.py` | 8 | 6 warning, 2 info |
+| `dlq.py` | 5 | 3 warning, 1 exception, 1 debug |
+| `circuit_breaker.py` | 3 | 1 warning, 2 exception |
+| `scenario.py` | 2 | warning |
+| `lp_solver.py` | 2 | warning |
+| `llm.py` | 2 | warning |
+| `errors.py` | 2 | warning |
+| `routers/optimizer.py` | 1 | warning |
+| `routers/forecast.py` | 1 | warning |
+| `routers/dlq.py` | 1 | warning |
+| `journal.py` | 1 | warning |
+| `dispatch.py` | 1 | warning |
+
+> **The count is a `grep` away.** `grep -rEn '\.(info|warning|warn|error|exception|debug|critical)\(' backend/app/ --include='*.py' | grep -v logging | wc -l`
+> — so it cannot drift silently the way a hand-written figure can. It *did*
+> drift once: an earlier draft of this document claimed "57 log statements
+> across nine modules", which no consistent filter of the code ever
+> produced.
 
 So the honest coverage statement is: **three layers are met with metrics, the
 fourth with logs.** See `docs/BACKEND.md` §4 for the event vocabulary and

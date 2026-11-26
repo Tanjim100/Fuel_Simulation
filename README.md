@@ -27,6 +27,11 @@ console (see [`docs/DASHBOARD.md`](docs/DASHBOARD.md)).
 To test the system under stress, inject domain events and API faults into the
 simulator — see [`docs/TESTING.md`](docs/TESTING.md).
 
+> **New here?** [`PLATFORM.md`](PLATFORM.md) is the one-document guide to the
+> whole system: what stack it is built on, how it is implemented, how each
+> problem is solved, and how to run and use it. Read that first if you are
+> picking this project up cold.
+
 ---
 
 ## 1. Quick start
@@ -266,8 +271,8 @@ platform's most important operational signal lives.
 
 **§15's fourth layer — logs — is covered by the backend's structured
 logging, not by a metric family**: a log line is not a metric, and a counter
-of log lines would be a number without meaning. The backend emits **57 log
-statements** across nine modules — every upstream failure with its exception
+of log lines would be a number without meaning. The backend emits **60 log
+statements** across fourteen modules — every upstream failure with its exception
 class, every circuit transition, every dispatch and journal write.
 
 The labels use the **route template**, never the raw path — otherwise

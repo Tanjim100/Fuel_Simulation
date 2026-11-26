@@ -100,6 +100,30 @@ From `loadtest/results/20261125T193715Z.json` — 30 seconds, 12 VUs, on a
 
 ---
 
+## The numbers reproduce
+
+A second, independent run (`loadtest/results/20261126T003154Z.json` — 30 s,
+10 VUs, run via `./scripts/verify-all.sh --with-load-test`) produced the same
+shape:
+
+| | **W1** — decision | **W2** — dashboard | **W3** — console mix |
+| :--- | ---: | ---: | ---: |
+| Requests | 1,166 | 5,297 | 4,864 |
+| **Error rate** | **0.0%** | **0.0%** | **0.0%** |
+| **p50** | 198.1 ms | 3.3 ms | 5.8 ms |
+| **p95** | 262.1 ms | 6.8 ms | 18.1 ms |
+| **p99** | 293.7 ms | 15.8 ms | 31.3 ms |
+| **Throughput** | 38.5 req/s | 176.3 req/s | 151.7 req/s |
+| **Saturation peak** | **1.00** | 0.00 | 0.00 |
+| Saturation mean | 0.65 | 0.00 | 0.00 |
+
+**The absolute numbers move with the machine; the shape does not.** The
+decision path saturates the pool and takes ~200 ms at p50 in both runs; the
+read paths stay at single-digit milliseconds and never touch the pool. That
+invariance is the finding — not any single figure.
+
+---
+
 ## What the numbers say
 
 **Zero errors throughout.** Not a small error rate — zero. 13,210 requests

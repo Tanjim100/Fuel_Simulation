@@ -493,10 +493,11 @@ circuit breaker, the stream, the snapshot and the dead-letter queue — a group
 the brief does not list. `docs/OBSERVABILITY.md` called the rows "one per §15
 layer", which was simply false.
 
-The layer *is* covered: the backend emits **57 log statements** across nine
-modules — every upstream failure with its exception class, every circuit
-transition, every dispatch and journal write. But **logs are not metrics**,
-and a counter of "how many log lines" would be a number without meaning.
+The layer *is* covered: the backend emits **60 log statements** across
+fourteen modules — every upstream failure with its exception class, every
+circuit transition, every dispatch and journal write. But **logs are not
+metrics**, and a counter of "how many log lines" would be a number without
+meaning.
 
 So the documents now say what is true: **three layers are met with metric
 families; the fourth is met with structured logging.** The split is stated
@@ -833,7 +834,7 @@ demo.
 | Idempotent dispatch + write-ahead journal | ✅ Complete |
 | Optimisation engine (greedy + optional LP) | ✅ Complete — proven against the live simulator |
 | Demand forecasting | ✅ Complete — exact, not approximate (60/60) |
-| Anomaly detection | ✅ Complete — six detectors + bounded observation log |
+| Anomaly detection | ✅ Complete — seven anomaly kinds (six detectors + stock-out risk) + bounded observation log |
 | Anomaly-to-explanation layer | ✅ Complete — deterministic and auditable; LLM isolated and off |
 | **Operator dashboard frontend** | ✅ **Complete — 5th service, live-verified, no-invented-numbers enforced** |
 | **Console redesign** | ✅ **Complete — one column, one hero, one panel at a time; light + dark theme** |
