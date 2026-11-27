@@ -20,6 +20,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import type {
   Anomaly,
+  AutopilotMode,
+  AutopilotStatus,
   BrokerHealth,
   Depot,
   ExecuteResponse,
@@ -46,6 +48,7 @@ export interface BackendData {
   anomalies: Anomaly[]
   incidents: Incident[]
   observability: Observability | null
+  autopilot: AutopilotStatus | null
   plan: OptimizeResponse | null
   execution: ExecuteResponse | null
   loading: boolean
@@ -53,10 +56,13 @@ export interface BackendData {
   streamState: StreamState
   planBusy: boolean
   executeBusy: boolean
+  autopilotBusy: boolean
   actionError: string | null
+  autopilotError: string | null
   refresh: () => void
   recompute: () => Promise<void>
   execute: () => Promise<void>
+  setAutopilotMode: (mode: AutopilotMode) => Promise<void>
 }
 
 /**
@@ -79,6 +85,7 @@ export function useBackend(): BackendData {
   const [anomalies, setAnomalies] = useState<Anomaly[]>([])
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [observability, setObservability] = useState<Observability | null>(null)
+  const [autopilot, setAutopilot] = useState<AutopilotStatus | null>(null)
   const [plan, setPlan] = useState<OptimizeResponse | null>(null)
   const [execution, setExecution] = useState<ExecuteResponse | null>(null)
 
@@ -87,7 +94,9 @@ export function useBackend(): BackendData {
   const [streamState, setStreamState] = useState<StreamState>('connecting')
   const [planBusy, setPlanBusy] = useState(false)
   const [executeBusy, setExecuteBusy] = useState(false)
+  const [autopilotBusy, setAutopilotBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [autopilotError, setAutopilotError] = useState<string | null>(null)
 
   // A ref, not state: the SSE callback must see the *current* refresh
   // function without re-subscribing every time it changes.
@@ -110,7 +119,7 @@ export function useBackend(): BackendData {
 
     const run = async () => {
       try {
-        const [h, b, m, d, s, r, f, a, i, o] = await Promise.all([
+        const [h, b, m, d, s, r, f, a, i, o, ap] = await Promise.all([
           api.health(),
           api.streamHealth(),
           api.metrics(),
@@ -121,6 +130,7 @@ export function useBackend(): BackendData {
           api.anomalies(),
           api.incidents(),
           api.observability(),
+          api.autopilot(),
         ])
         // A newer refresh has started; its result is the freshest one.
         if (!isCurrent()) return
@@ -134,6 +144,7 @@ export function useBackend(): BackendData {
         setAnomalies(a.anomalies)
         setIncidents(i.incidents)
         setObservability(o)
+        setAutopilot(ap)
         setError(null)
       } catch (err) {
         if (!isCurrent()) return
@@ -258,6 +269,30 @@ export function useBackend(): BackendData {
     }
   }, [refresh])
 
+  /**
+   * Switch the autopilot's mode.
+   *
+   * The mode is the backend's business -- it owns the loop, the lock and
+   * the write path -- so the console asks and then re-reads. The response
+   * is the new status, so the bar updates immediately rather than waiting
+   * for the next poll.
+   */
+  const setAutopilotMode = useCallback(async (mode: AutopilotMode) => {
+    setAutopilotBusy(true)
+    setAutopilotError(null)
+    try {
+      const status = await api.setAutopilotMode(mode)
+      setAutopilot(status)
+      refreshRef.current()
+    } catch (err) {
+      setAutopilotError(
+        err instanceof Error ? err.message : 'Could not change the autopilot mode.',
+      )
+    } finally {
+      setAutopilotBusy(false)
+    }
+  }, [])
+
   return {
     health,
     broker,
@@ -269,6 +304,7 @@ export function useBackend(): BackendData {
     anomalies,
     incidents,
     observability,
+    autopilot,
     plan,
     execution,
     loading,
@@ -276,9 +312,12 @@ export function useBackend(): BackendData {
     streamState,
     planBusy,
     executeBusy,
+    autopilotBusy,
     actionError,
+    autopilotError,
     refresh,
     recompute,
     execute,
+    setAutopilotMode,
   }
 }

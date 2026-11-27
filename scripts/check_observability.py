@@ -46,6 +46,11 @@ REQUIRED_FAMILIES: dict[str, list[tuple[str, tuple[str, ...]]]] = {
         ("backend_forecast_validation_total", ("verdict",)),
         ("backend_shortage_alerts_total", ("severity",)),
         ("backend_decisions_total", ("kind",)),
+        ("backend_autopilot_enabled", ()),
+        ("backend_autopilot_mode", ()),
+        ("backend_autopilot_cycles_total", ("outcome",)),
+        ("backend_autopilot_dispatches_total", ("outcome",)),
+        ("backend_autopilot_litres_total", ()),
         ("backend_fallback_activations_total", ("kind",)),
     ],
     "resilience": [

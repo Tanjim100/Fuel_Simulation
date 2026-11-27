@@ -310,3 +310,51 @@ export interface Forecast {
   demand: Record<string, number[]>
   stockout_risk?: StockoutRisk[]
 }
+
+/**
+ * The autopilot's state, as the backend reports it.
+ *
+ * Every field here is the backend's own number. The console does not
+ * derive an autopilot figure from anything else — the autopilot's decisions
+ * are a separate stream of facts, and a derivation would blur them with
+ * the operator's decisions.
+ */
+export type AutopilotMode = 'off' | 'live'
+
+/**
+ * One shipment the autopilot dispatched.
+ *
+ * These are the allocation records the simulator returned, passed through
+ * unchanged. The console renders them; it does not derive them.
+ */
+export interface AutopilotShipment {
+  allocation_id?: string
+  idempotency_key?: string
+  route_id?: string
+  depot_id?: string
+  destination_station_id?: string
+  fuel_type?: string
+  quantity?: number
+  created_tick?: number
+  [key: string]: unknown
+}
+
+export interface AutopilotStatus {
+  status: string
+  mode: AutopilotMode
+  enabled: boolean
+  running: boolean
+  cycle: number
+  last_cycle_tick: number | null
+  last_decision: string | null
+  last_created: number
+  last_replayed: number
+  last_failed: number
+  last_litres: number
+  last_escalated: boolean
+  quarantine_until_tick: number | null
+  last_error: string | null
+  updated_at: string
+  last_shipments: AutopilotShipment[]
+  note?: string
+}

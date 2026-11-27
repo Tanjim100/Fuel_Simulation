@@ -47,7 +47,7 @@ operator when it cannot answer it**, and says why.
 | `simulator-api` | 8000 | The world. Organizer-provided, read-mostly. Never modified. |
 | `redis` | 6379 | Cache, pub/sub, the SSE fan-out. |
 | `client-verifier` | 8001 | The 49-check conformance suite + a health sidecar. |
-| `backend` | 8002 | The intelligence layer: snapshot, forecast, anomalies, optimiser, gate, journal, metrics. |
+| `backend` | 8002 | The intelligence layer: snapshot, forecast, anomalies, optimiser, gate, journal, metrics, autopilot. |
 | `frontend` | 8003 | The operator console. |
 
 Plus an **opt-in** overlay (`observability/compose.monitoring.yml`) adding
@@ -188,14 +188,15 @@ an answer somewhere in this codebase:
 | :--- | :--- |
 | **Dashboard** — live depot/station inventories, route status, supply schedule, shortage alerts, stockout timeline, system health | The console's four tabs — Network, Forecast, Problems, System — [§4.6](#46-the-console-one-column-three-tiers) |
 | **Inspectable decisions** — every recommendation explains its why, with human-in-the-loop approval | The ActionCard + Details disclosure, two-click dispatch — [§4.3](#43-the-decision-path-the-gate) |
+| **Autonomous dispatch** — fuel moves without an operator pressing the button | The autopilot: `off` / `live`, reusing the same planner, gate and journal — [§5.14](#514-the-autopilot--dispatch-without-an-operator) |
 | **Prediction** — demand forecast with hour-of-day and `demand_multiplier`; stockout probability | The backend re-implements the simulator's demand formula *exactly* — [§2 Trap 1](#trap-1-the-world-is-stochastic-so-the-forecast-is-an-estimate) |
 | **Detection** — demand spikes, inventory drops, route/depot bottlenecks | Seven anomaly kinds, each with a measured threshold, counted once per finding — [§5.3](#53-anomaly-detection-seven-kinds-counted-once) |
 | **Decision intelligence** — constrained optimisation honouring route, depot, inventory and station limits; split large shipments; reroute when disrupted | A greedy solver that is always feasible, with an optional LP path that is adopted only when it scores better — [§5.4](#54-optimisation-greedy-by-default-lp-when-it-helps) |
 | **Reproducible deployment** — one command, health checks, restart policies | `docker compose up -d` → 5 healthy services — [§6.1](#61-quick-start) |
-| **Observability** — request rate, p95, error rate, CPU/memory, fallback activations, structured logs | 22 required metric families across the four PDF layers — [§5.12](#512-observability-three-layers-by-metrics-one-by-logs) |
-| **Load testing** — throughput and p50/p95/p99 under concurrency | Three measured runs, tied to pool saturation — [§6.9](#69-load-testing) |
+| **Observability** — request rate, p95, error rate, CPU/memory, fallback activations, structured logs | 27 required metric families across the four PDF layers — [§5.12](#512-observability-three-layers-by-metrics-one-by-logs) |
+| **Load testing** — throughput and p50/p95/p99 under concurrency | Three measured runs, tied to pool saturation — [§6.10](#610-load-testing) |
 | **API faults** — `unavailable`, `latency`, `error_rate`, `stale_data`, `stream_disconnect` | Backoff + circuit breaker + degraded mode — [§5.6](#56-resilience-the-circuit-breaker) |
-| **Domain crises** — demand spike, route disruption, depot constraint, shipment delay, supply shortfall, station outage | Anomaly detection, rerouting, priority allocation — [§6.11](#611-testing-by-injection-the-simulators-fault-switches) |
+| **Domain crises** — demand spike, route disruption, depot constraint, shipment delay, supply shortfall, station outage | Anomaly detection, rerouting, priority allocation — [§6.12](#612-testing-by-injection-the-simulators-fault-switches) |
 | **Allocation errors** — `409`/`422` on capacity overflow, duplicate retries, invalid cancellation | A pre-flight validator that mirrors the simulator's *ordered* rejection reasons, and idempotency keys persisted before the write — [§2 Trap 2](#trap-2-the-simulator-rejects-writes-and-its-rejection-reasons-are-ordered) |
 | **Malformed payloads** — validate strictly; quarantine rather than crash | Pydantic schemas + a bounded dead-letter queue with replay — [§9](#9-the-api-surface) |
 | **Bounded history** — never query `/v1/demand-history` without a limit | `limit` is mandatory in every call, and `STATE_MAX_AGE` bounds the snapshot |
@@ -700,10 +701,10 @@ PDF §15 names four layers: **application**, **system**, **intelligence** and
 > **Three layers are met with metric families; the fourth — logs — is met with
 > the backend's structured logging, because a log line is not a metric.**
 
-29 metric families cover application (request rate, latency, error rate,
+34 metric families cover application (request rate, latency, error rate,
 availability), system (pool saturation, in-flight reads, queue depth) and
 intelligence (forecast error, shortage alerts, decision frequency, **fallback
-activation** — named explicitly in §15). The Grafana dashboard has a **fourth
+activation** — named explicitly in §15 — and the autopilot's five families). The Grafana dashboard has a **fourth
 row, resilience**, which §15 does not list but which is where this platform's
 most important operational signal lives.
 
@@ -758,6 +759,59 @@ break on an unexpected string. The pre-existing keys are **preserved** (the
 console and the container healthcheck both read them); the new ones are added
 alongside.
 
+### 5.14 The autopilot — dispatch without an operator
+
+The manual dispatch path is safe but *reactive*: an operator has to notice a
+card, read it, and click **Dispatch** inside the tick window. That is a
+reasonable design for a supervised system and a poor one for a platform whose
+headline claim is *"fuel is allocated before demand bites"* — because that
+claim depends on a human noticing.
+
+The autopilot makes the platform *proactive*. Two modes:
+
+| Mode | Plans? | Gates? | Writes? | Meaning |
+| :--- | :--- | :--- | :--- | :--- |
+| `off` | no | no | no | Today's behaviour. The shipped default. The console tells the operator when there is something to dispatch. |
+| `live` | yes | yes | yes | It dispatches, once per tick, and the console shows what it dispatched. |
+
+**It is not a new planner and not a new gate.** It calls `optimize()`,
+`gate_plan()` and `execute_shipments()` — the exact functions the operator's
+button calls — and decides only *when* to call them. A second planner would be
+a second set of arithmetic to be wrong.
+
+**`off` is the shipped default**, so `docker compose up -d` behaves exactly as
+it did before the feature existed. That is what makes it safe to exist: the
+49-check verifier suite is never at risk unless a human turns it on.
+
+**Anomalies escalate the budget; they never gate the dispatch.** A detected
+problem is a reason to move *more* fuel, not a reason to stop moving it. The
+ceiling rises from 12,000 L/tick to 24,000 L/tick when the anomaly pipeline
+reports anything. The cap is applied to the gate's *accepted* list, not the
+planner's input, so the plan is unchanged and the autopilot's decisions stay
+comparable with the operator's.
+
+**Three independent defences against a double dispatch** — deliberately
+redundant, because redundancy is what survives a restart:
+
+| Defence | Survives a restart? |
+| :--- | :--- |
+| The tick guard — at most one dispatch per simulator tick; a world reset rewinds the tick and the guard gets out of the way. | No |
+| The idempotency key — a repeat is a simulator-side **REPLAY**, not a second shipment. | **Yes** |
+| The simulator's own per-tick dispatch cap. | **Yes** |
+
+**The manual button always works, and the card carries both modes.** A human
+must always be able to overrule the system, so the button is present in both
+modes — what changes is the *label*. With the autopilot **off** the card asks
+you to dispatch: `Dispatch needed — 7,000 L`. With it **live** the button
+becomes an override, `Dispatch 7,000 L anyway`, and the card shows what the
+system dispatched: `Last dispatch: tick 61 · 4,200 L · created 1`.
+
+The autopilot and the operator's `POST /api/optimize/execute` share a single
+`asyncio.Lock`, so *"the autopilot and a manual click cannot interleave"* is a
+structural property rather than a convention.
+
+Full documentation: **`docs/AUTOPILOT.md`**.
+
 ---
 
 ## 6. How to use it
@@ -765,7 +819,7 @@ alongside.
 ### 6.1 Quick start
 
 **Prerequisites:** Docker Desktop, and a path **without spaces** (see
-[§6.7](#67-the-docker-desktop-constraint)).
+[§6.8](#68-the-docker-desktop-constraint)).
 
 ```bash
 # 1. Build and start the whole stack
@@ -791,7 +845,7 @@ open http://localhost:8003
 
 Runs, in order: the **49-check verifier suite**, the **backend pytest suite**,
 the **frontend test suite**, the **load test**, and the **observability
-self-check** (46 assertions covering every §15 layer, the §16 table, the
+self-check** (51 assertions covering every §15 layer, the §16 table, the
 content type, and the label sets). Emits one JSON object with per-suite
 pass/fail, counts and durations. Exit code 0 only if everything passed.
 
@@ -866,7 +920,44 @@ curl -s http://localhost:8002/api/observability | python3 -m json.tool
 curl -N http://localhost:8002/api/events/stream
 ```
 
-### 6.6 The demos
+### 6.6 The autopilot, by hand
+
+The autopilot ships **off**. Turning it on is three commands, and turning it
+back off is the fourth:
+
+```bash
+# What is it doing? (off by default)
+curl -s http://localhost:8002/api/autopilot
+
+# There is no rehearsal mode — posting one is an error, not a silent no-op.
+curl -s -X POST http://localhost:8002/api/autopilot/mode \
+  -H 'Content-Type: application/json' -d '{"mode":"dry_run"}'
+# -> 400, code INVALID_AUTOPILOT_MODE
+
+# Live — it dispatches at most once per tick.
+curl -s -X POST http://localhost:8002/api/autopilot/mode \
+  -H 'Content-Type: application/json' -d '{"mode":"live"}'
+sleep 8
+curl -s http://localhost:8002/api/autopilot
+# -> "last_decision": "dispatched", "last_created": > 0, "last_shipments": [...]
+
+curl -s http://localhost:8002/metrics | grep backend_autopilot
+curl -s http://localhost:8002/metrics | grep 'backend_decisions_total'
+
+# Back to the shipped default.
+curl -s -X POST http://localhost:8002/api/autopilot/mode \
+  -H 'Content-Type: application/json' -d '{"mode":"off"}'
+```
+
+> **The acceptance check.** With the autopilot **live**, the 49-check verifier
+> suite must still pass:
+> ```bash
+> docker compose exec -T client-verifier python verify_simulator.py \
+>   --base-url http://simulator-api:8000 --redis-url redis://redis:6379/0
+> ```
+> It does. That is the property that makes the feature safe to leave running.
+
+### 6.7 The demos
 
 Two repeatable scripts, each printing the exact commands **and** the expected
 observable output at every step:
@@ -880,7 +971,7 @@ The second one injects a fault, shows the breaker trip, shows the console
 degrading to the cached world, clears the fault, and shows the breaker close
 **on its own**. It cleans up the fault on exit, even if interrupted.
 
-### 6.7 The Docker Desktop constraint
+### 6.8 The Docker Desktop constraint
 
 **This project's path contains spaces, and Docker Desktop cannot bind-mount
 it.** Every config file is therefore **baked into the image** rather than
@@ -893,7 +984,7 @@ mounted, and the build context is the **project root**:
 **Also note:** `docker compose build` does **not** recreate the running
 container. Always follow a build with `--force-recreate`.
 
-### 6.8 The monitoring stack (opt-in)
+### 6.9 The monitoring stack (opt-in)
 
 ```bash
 docker compose -f docker-compose.yml -f observability/compose.monitoring.yml up -d
@@ -909,7 +1000,7 @@ in the `BUET CSE Fest` folder: four rows, nineteen panels. Prometheus carries
 **nine alert rules** (pool saturation, circuit open, high latency, high error
 rate, suspected stream drops, probe failures, non-empty DLQ, …).
 
-### 6.9 Load testing
+### 6.10 Load testing
 
 ```bash
 ./loadtest/run.sh --duration 60 --vus 20
@@ -923,7 +1014,7 @@ request latency to pool saturation**. That snapshot is the point: the PDF asks
 for "understanding the behavior and limits of the implemented system rather
 than achieving an arbitrary benchmark".
 
-### 6.10 The measured results
+### 6.11 The measured results
 
 From `loadtest/results/20261126T003154Z.json` — 30 s, 10 VUs, three scenarios:
 
@@ -951,7 +1042,7 @@ gave the same shape — W1 saturation 1.00 / mean 0.64, W2 and W3 at 0.00 —
 with W1's p50 at 202 ms. The numbers move with the machine; the *shape* does
 not. That is the point of the report.
 
-### 6.11 Testing by injection — the simulator's fault switches
+### 6.12 Testing by injection — the simulator's fault switches
 
 The simulator exposes an **admin API** that lets you break the world on
 purpose. This is how the platform's resilience is actually *demonstrated*
@@ -1057,7 +1148,7 @@ oracle* rather than a unit test:
 ./scripts/check_observability.py
 ```
 
-**46 assertions** covering every §15 layer, the §16 table, the content type,
+**51 assertions** covering every §15 layer, the §16 table, the content type,
 and the label sets. It fails if a metric family disappears, if a required label
 goes missing, if the content type drifts, or if a component's state leaves the
 known set.
@@ -1151,6 +1242,12 @@ afterwards, so the next slow run is diagnosable rather than mysterious.
 | `SCENARIO_PATH` | `backend/scenarios/baseline.yaml` | The scenario file. **Read at import time** — must be set before the process starts. |
 | `DLQ_MAX_ENTRIES` | `1000` | DLQ cap; oldest evicted. |
 | `ANOMALY_HISTORY_WINDOW` | `32` | Ticks of history the detectors compare against. |
+| `AUTOPILOT_MODE` | `"off"` | The mode the backend boots into. **`off` is the shipped default.** |
+| `AUTOPILOT_INTERVAL_SECONDS` | `2.0` | The autopilot's cycle period. Sized against the 2-second tick. |
+| `AUTOPILOT_MAX_LITRES_PER_TICK` | `12000.0` | The normal budget per tick. |
+| `AUTOPILOT_MAX_LITRES_PER_TICK_ESCALATED` | `24000.0` | The budget when anomalies are present. |
+| `AUTOPILOT_MAX_SHIPMENTS_PER_TICK` | `8` | The hard cap on allocations per cycle. |
+| `AUTOPILOT_RESET_QUARANTINE_TICKS` | `2` | How long a rejected tick is quarantined. |
 
 Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`, case-insensitively.
 
@@ -1164,7 +1261,7 @@ derive a new scenario: `docs/SCENARIO.md`.
 
 ## 9. The API surface
 
-**42 routes** on the backend (`GET /openapi.json` lists them all), plus the
+**45 routes** on the backend (`GET /openapi.json` lists them all), plus the
 verifier's own.
 
 ### Health & observability
@@ -1215,6 +1312,14 @@ verifier's own.
 | `POST` | `/api/allocations` | Create an allocation. |
 | `POST` | `/api/allocations/{allocation_id}/cancel` | Cancel a PENDING allocation. |
 
+### The autopilot
+
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/api/autopilot` | The autopilot's mode and what it last did. |
+| `POST` | `/api/autopilot/mode` | Switch the mode. Body: `{"mode": "off" \| "live"}`. An unknown mode is a **400**, not a silent clamp. |
+| `POST` | `/api/autopilot/cycle` | Run one cycle by hand and report it. **Diagnostic.** |
+
 ### Events & the DLQ
 
 | Method | Path | Purpose |
@@ -1235,6 +1340,7 @@ verifier's own.
 | `docs/ARCHITECTURE.md` | The as-built diagram, sequence diagrams, the data-flow table. |
 | `docs/BACKEND.md` | Every backend module, the event vocabulary, the configuration table. |
 | `docs/DASHBOARD.md` | The console, panel by panel. |
+| `docs/AUTOPILOT.md` | The autopilot: the two modes, the ten-step cycle, the double-dispatch defences, the merged dispatch card. |
 | `docs/OBSERVABILITY.md` | The full metric catalogue, the alert rules, the pool-saturation signal. |
 | `docs/RESILIENCE.md` | The breaker's state machine, the degraded-mode contract, the measured recovery timeline. |
 | `docs/LOAD_TEST.md` | The workload definition, the report schema, the measured results. |
@@ -1245,7 +1351,7 @@ verifier's own.
 | `docs/BRIEF.md` | What the brief asked for, what is implemented, and what is not — and why. |
 | `docs/system_understanding_and_requirements.md` | The Day-1 requirements analysis: the domain model, the simulator's integration rules, the functional and technical requirements, the operational problems, and the evaluation breakdown. |
 | `docs/PROMPT_JOURNAL.md` | The prompt sequence that built this system, step by step — and what each prompt actually bought. |
-| `regular_updates/Day_1.md` … `Day_6.md` | The build log, including the bugs found and the measured results. |
+| `regular_updates/Day_1.md` … `Day_7.md` | The build log, including the bugs found and the measured results. |
 
 ---
 

@@ -331,6 +331,102 @@ button:disabled {
 }
 
 /* --------------------------------------------------------------------- */
+/* Autopilot — the manual / automatic switch                              */
+/* --------------------------------------------------------------------- */
+
+.autopilot {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.autopilot__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.autopilot__modes {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.autopilot__mode {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  padding: 6px 14px;
+  cursor: pointer;
+  border-right: 1px solid var(--border);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.autopilot__mode:last-child {
+  border-right: none;
+}
+
+.autopilot__mode:hover:not(:disabled) {
+  background: var(--bg-inset);
+  color: var(--text);
+}
+
+.autopilot__mode--on,
+.autopilot__mode--on:hover:not(:disabled) {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.autopilot__mode:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.autopilot__state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.autopilot__note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  max-width: 78ch;
+}
+
+.autopilot__cycles {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/*
+ * The autopilot's own last dispatch, on the card. The operator's dispatch
+ * lives in the "Details" disclosure; this one is the headline, because when
+ * the autopilot is live it is the dispatch that actually happened.
+ */
+.hero__auto {
+  margin: 0;
+  padding: 0 var(--space-5) var(--space-5);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+/* --------------------------------------------------------------------- */
 /* Tabs                                                                   */
 /* --------------------------------------------------------------------- */
 

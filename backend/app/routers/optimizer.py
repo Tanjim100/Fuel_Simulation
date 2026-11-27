@@ -273,7 +273,16 @@ async def execute_optimization(
     client = request.app.state.client
     journal = getattr(request.app.state, "journal", None)
 
-    outcome = await execute_shipments(client, journal, executable)
+    # The same lock the autopilot takes. An operator's click and an
+    # automatic dispatch must never interleave: two writers racing on the
+    # simulator's per-tick dispatch cap would make one of them fail for a
+    # reason that has nothing to do with its plan.
+    dispatch_lock = getattr(request.app.state, "dispatch_lock", None)
+    if dispatch_lock is None:
+        outcome = await execute_shipments(client, journal, executable)
+    else:
+        async with dispatch_lock:
+            outcome = await execute_shipments(client, journal, executable)
 
     # The decision frequency the PDF's section 15 intelligence layer asks
     # for. Counted *after* the write, and only for shipments that actually

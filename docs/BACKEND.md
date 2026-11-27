@@ -1387,8 +1387,79 @@ thousands of litres and looks perfectly plausible.
 | Script | What it does |
 | :--- | :--- |
 | `scripts/verify-all.sh` | The harness entry point. Runs the verifier suite, the backend tests, the frontend tests, the observability self-check and the load test, and emits one JSON object. Exit code 0 only if everything passed. |
-| `scripts/check_observability.py` | 46 assertions over the exposition and the health table: every §15 family present, the right labels, the right content type, the §16 components in a known state set. |
+| `scripts/check_observability.py` | 51 assertions over the exposition and the health table: every §15 family present, the right labels, the right content type, the §16 components in a known state set. |
 | `scripts/demo-normal.sh` | Beats 1–8 of the demo. |
 | `scripts/demo-crisis-fault-recovery.sh` | Beats 9–14, including the fault injection and the observed breaker transition. |
 | `loadtest/run.sh` | The load test. Picks k6 if installed, the Python harness otherwise. Both emit the same JSON schema. |
 | `.github/workflows/ci.yml` | The CI workflow. Runs `scripts/verify-all.sh` — the same command a human runs — on every push to `main` and every pull request, and uploads the JSON report as an artifact. The load test is included on `main` and skipped on pull requests, because it deliberately puts the backend under load. |
+
+---
+
+# Part IV — The autopilot
+
+## 20. The autopilot (`backend/app/autopilot.py`)
+
+The autopilot dispatches fuel without an operator pressing the button. It is
+documented in full in **`docs/AUTOPILOT.md`**; this section is the API
+summary and the configuration table.
+
+The one thing to understand about it: **it is not a new planner and not a new
+gate.** It calls `optimize()`, `gate_plan()` and `execute_shipments()` — the
+exact functions the operator's button calls — and decides only *when* to call
+them.
+
+### 20.1 The endpoints
+
+| Endpoint | Returns |
+| :--- | :--- |
+| `GET /api/autopilot` | The current mode and what the autopilot last did. |
+| `POST /api/autopilot/mode` | The status after the switch. Body: `{"mode": "off" \| "live"}`. |
+| `POST /api/autopilot/cycle` | The result of one cycle. **Diagnostic** — the loop is already running. |
+
+**An unknown mode is a 400 with the domain code `INVALID_AUTOPILOT_MODE`**,
+not a silent clamp. A controller that quietly fell back to `off` would look
+identical to one that is working — the operator would believe the autopilot
+was dispatching when it was not.
+
+### 20.2 The autopilot's configuration
+
+| Variable | Default | Meaning |
+| :--- | :--- | :--- |
+| `AUTOPILOT_MODE` | `"off"` | The mode the backend boots into. |
+| `AUTOPILOT_INTERVAL_SECONDS` | `2.0` | The cycle period. Sized against the 2-second tick. |
+| `AUTOPILOT_MAX_LITRES_PER_TICK` | `12000.0` | The normal budget per tick. |
+| `AUTOPILOT_MAX_LITRES_PER_TICK_ESCALATED` | `24000.0` | The budget when anomalies are present. |
+| `AUTOPILOT_MAX_SHIPMENTS_PER_TICK` | `8` | The hard cap on allocations per cycle. |
+| `AUTOPILOT_RESET_QUARANTINE_TICKS` | `2` | How long a rejected tick is quarantined. |
+
+`AUTOPILOT_MODE: "off"` in `docker-compose.yml` is the safety guarantee:
+**`docker compose up -d` behaves exactly as it did before the autopilot
+existed**, and the 49-check verifier suite is never at risk unless a human
+turns it on.
+
+The mode itself is *runtime*-mutable — it lives in the controller, not in
+`Settings`, which is a frozen dataclass of boot-time values.
+
+### 20.3 The shared dispatch lock
+
+`app.state.dispatch_lock` is a single `asyncio.Lock` taken by **both** the
+autopilot and `POST /api/optimize/execute`. That makes *"the autopilot and a
+manual click cannot interleave"* a structural property rather than a
+convention.
+
+### 20.4 The new metric families
+
+Five new families, and one new label value on an existing one:
+
+| Metric | Type | Labels |
+| :--- | :--- | :--- |
+| `backend_autopilot_enabled` | gauge | — |
+| `backend_autopilot_mode` | gauge | — (`0`=off, `1`=live) |
+| `backend_autopilot_cycles_total` | counter | `outcome` |
+| `backend_autopilot_dispatches_total` | counter | `outcome` |
+| `backend_autopilot_litres_total` | counter | — |
+
+`backend_decisions_total` gains **`kind="autopilot"`**, distinct from the
+existing `kind="dispatch"`. Folding them together would make the
+human-decision counter dishonest: an autopilot decision is a decision the
+operator did not make.

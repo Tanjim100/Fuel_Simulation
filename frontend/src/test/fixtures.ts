@@ -8,6 +8,7 @@
 
 import type {
   Anomaly,
+  AutopilotStatus,
   BrokerHealth,
   Depot,
   ForecastSummary,
@@ -358,4 +359,61 @@ export const observability: Observability = {
     },
     histograms: {},
   },
+}
+
+/**
+ * The autopilot's status, copied from a real backend response.
+ *
+ * The shape matches `GET /api/autopilot` exactly, so a test that passes
+ * here is a test against reality.
+ */
+export const autopilot: AutopilotStatus = {
+  status: 'OK',
+  mode: 'off',
+  enabled: false,
+  running: false,
+  cycle: 0,
+  last_cycle_tick: null,
+  last_decision: null,
+  last_created: 0,
+  last_replayed: 0,
+  last_failed: 0,
+  last_litres: 0,
+  last_escalated: false,
+  quarantine_until_tick: null,
+  last_error: null,
+  updated_at: '2026-11-27T10:00:00+00:00',
+  last_shipments: [],
+  note: 'The autopilot is off. The console tells you when there is something to dispatch, and an operator dispatches it by hand.',
+}
+
+/**
+ * The autopilot, live, after it dispatched on its own.
+ *
+ * Every figure here is the backend's own -- the console renders them
+ * verbatim, so the fixture mirrors what `GET /api/autopilot` returns.
+ */
+export const autopilotLiveDispatched: AutopilotStatus = {
+  ...autopilot,
+  mode: 'live',
+  enabled: true,
+  running: true,
+  cycle: 12,
+  last_cycle_tick: 61,
+  last_decision: 'dispatched',
+  last_created: 1,
+  last_litres: 4200,
+  last_shipments: [
+    {
+      allocation_id: 'alloc-1',
+      idempotency_key: 'alloc-t61-depot-station-diesel-1-abcdef12',
+      route_id: 'route-mirpur-dhanmondi',
+      depot_id: 'depot-mirpur',
+      destination_station_id: 'station-dhanmondi',
+      fuel_type: 'DIESEL',
+      quantity: 4200,
+      created_tick: 61,
+    },
+  ],
+  note: 'The autopilot re-plans against the live world every tick and dispatches what the gate accepts. You can still dispatch by hand.',
 }

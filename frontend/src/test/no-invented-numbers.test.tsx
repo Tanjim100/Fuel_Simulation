@@ -39,6 +39,7 @@ import {
 } from '../lib/derive'
 import {
   anomalies,
+  autopilotLiveDispatched,
   broker,
   depots,
   forecast,
@@ -122,6 +123,10 @@ function backendNumbers(): Set<number> {
   walk(forecast)
   walk(anomalies)
   walk(plan)
+  // The autopilot's status is a backend payload too. Its tick, its litres
+  // and its counts are the backend's own figures, so they belong in the
+  // allow-list exactly as the plan's do.
+  walk(autopilotLiveDispatched)
 
   return allowed
 }
@@ -285,6 +290,24 @@ describe('the console invents no numbers', () => {
       />,
     )
     assertNoInventedNumbers(container, 'ActionCard')
+  })
+
+  it('the action card renders only backend figures with the autopilot live', () => {
+    // The card now carries the autopilot's own dispatch line, so it has to
+    // hold to the same contract: every figure it shows -- the tick, the
+    // litres, the created count -- is the backend's.
+    const { container } = render(
+      <ActionCard
+        plan={plan}
+        execution={null}
+        busy={false}
+        error={null}
+        autopilot={autopilotLiveDispatched}
+        onExecute={() => {}}
+        onRecompute={() => {}}
+      />,
+    )
+    assertNoInventedNumbers(container, 'ActionCard (autopilot live)')
   })
 
   it('the system panel renders only backend figures', () => {

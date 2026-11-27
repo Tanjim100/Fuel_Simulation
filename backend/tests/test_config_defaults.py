@@ -77,6 +77,17 @@ PINNED = (
     "STATE_MAX_AGE",
 )
 
+#: The pinned variables that are *text*, not numbers.
+#:
+#: They need their own table because the comparison above is `float(a) ==
+#: float(b)`, and `float("off")` raises. The autopilot's boot mode is the
+#: first setting that is not a number, and it is the one that matters most
+#: to get right: the autopilot writes to the same simulator the verifier
+#: suite asserts against, so its default must be "off" in *both* places.
+PINNED_TEXT = {
+    "AUTOPILOT_MODE": "off",
+}
+
 
 @pytest.mark.parametrize("name", PINNED)
 def test_the_code_default_matches_the_compose_value(name: str) -> None:
@@ -100,6 +111,26 @@ def test_the_code_default_matches_the_compose_value(name: str) -> None:
     )
 
 
+@pytest.mark.parametrize("name", sorted(PINNED_TEXT))
+def test_the_code_default_matches_the_compose_value_for_text(name: str) -> None:
+    """The same check, for the settings that are text rather than numbers."""
+    compose = _compose_env()
+    assert name in compose, f"{name} is not set in docker-compose.yml"
+
+    previous = os.environ.pop(name, None)
+    try:
+        loaded = Settings.from_env()
+    finally:
+        if previous is not None:
+            os.environ[name] = previous
+
+    default = getattr(loaded, name.lower())
+    assert default == compose[name], (
+        f"{name}: config.py defaults to {default!r}, but docker-compose.yml "
+        f"sets {compose[name]!r}. The two must agree."
+    )
+
+
 def test_the_dataclass_default_matches_the_compose_value() -> None:
     """`Settings(...)` built directly must agree with `from_env()` too.
 
@@ -111,6 +142,10 @@ def test_the_dataclass_default_matches_the_compose_value() -> None:
     for name in PINNED:
         assert float(getattr(direct, name.lower())) == float(compose[name]), (
             f"{name}: the dataclass default differs from the compose value"
+        )
+    for name, expected in PINNED_TEXT.items():
+        assert getattr(direct, name.lower()) == expected, (
+            f"{name}: the dataclass default differs from the pinned value"
         )
 
 
@@ -126,3 +161,28 @@ def test_the_snapshot_ttl_exceeds_the_poll_interval() -> None:
         "STATE_MAX_AGE must exceed POLL_INTERVAL, or a healthy world is "
         "marked stale for most of every poll cycle"
     )
+
+
+def test_the_autopilot_cycle_is_not_faster_than_a_second() -> None:
+    """The autopilot's cycle must not be faster than the world's tick.
+
+    The simulator ticks every 2 seconds at the default speed. A cycle
+    faster than that would re-plan the same tick repeatedly -- burning
+    upstream reads for a decision that cannot change, because the world
+    has not moved.
+    """
+    settings = Settings.from_env()
+    assert settings.autopilot_interval_seconds >= 1.0, (
+        "AUTOPILOT_INTERVAL_SECONDS must be at least 1 second, or the "
+        "autopilot re-plans the same tick several times over"
+    )
+
+
+def test_the_autopilot_boots_off() -> None:
+    """The autopilot must be off unless somebody deliberately turns it on.
+
+    It writes to the same simulator the verifier suite asserts against, so
+    "off" is the only safe default.
+    """
+    assert Settings().autopilot_mode == "off"
+    assert Settings.from_env().autopilot_mode == "off"

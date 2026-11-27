@@ -129,6 +129,28 @@ services:
       # and the console renders a red "Stale data" banner on a system that is
       # working fine. 3s = three poll intervals of slack.
       STATE_MAX_AGE: "3"
+      # -- the autopilot ------------------------------------------------- #
+      # The mode the backend boots into: "off" | "live".
+      #
+      # "off" is the shipped default and it is the reason this feature is
+      # safe to exist: `docker compose up -d` behaves exactly as it did
+      # before the autopilot was written. The autopilot writes to the same
+      # simulator the verifier suite asserts against, so it must be turned
+      # on deliberately -- from the console, or with
+      # POST /api/autopilot/mode.
+      AUTOPILOT_MODE: "off"
+      # Seconds between autopilot cycles. One cycle per simulator tick at
+      # the default 2s tick; a faster cycle would re-plan the same tick.
+      AUTOPILOT_INTERVAL_SECONDS: "2"
+      # How many litres the autopilot may dispatch in one tick.
+      AUTOPILOT_MAX_LITRES_PER_TICK: "12000"
+      # ...and how many when anomalies escalate the budget. Anomalies raise
+      # the ceiling; they never gate dispatch.
+      AUTOPILOT_MAX_LITRES_PER_TICK_ESCALATED: "24000"
+      # The hard cap on allocations per cycle, in both budget tiers.
+      AUTOPILOT_MAX_SHIPMENTS_PER_TICK: "8"
+      # How many ticks a failed tick is quarantined for.
+      AUTOPILOT_RESET_QUARANTINE_TICKS: "2"
       EVENT_BUFFER: "200"
       SUBSCRIBER_QUEUE: "64"
       JOURNAL_PATH: /app/data/journal.sqlite3

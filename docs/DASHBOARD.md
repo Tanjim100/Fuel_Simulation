@@ -140,6 +140,11 @@ and nothing else: every guarantee below survives it.
 ┌─ Status bar ─────────────────────────────────────────────────────────────┐
 │ ● NOMINAL   Service 91.6%   Disrupted 1   Closed 0   Dispatched 12  ☀ ⋯ │
 └──────────────────────────────────────────────────────────────────────────┘
+┌─ Autopilot ──────────────────────────────────────────────────────────────┐
+│ AUTOPILOT   [ Manual ] [ Autopilot ]              ● Manual dispatch       │
+│ Manual — the system is not dispatching. When there is something to       │
+│ dispatch, the card below asks you to.                                   │
+└──────────────────────────────────────────────────────────────────────────┘
 ┌─ The action ─────────────────────────────────────────────────────────────┐
 │ RECOMMENDED                                              [ Recompute ]   │
 │ Ship 7000 L of DIESEL from Patiya Depot to Mirpur Fuel Station now.     │
@@ -149,7 +154,7 @@ and nothing else: every guarantee below survives it.
 │ Planned volume     Projected service     Shippable now    Gate            │
 │ 7,000 L            92.0%                 1                4 ok / 0 no    │
 │                                                                          │
-│ [ Dispatch 7,000 L ]   [ Details ]                                       │
+│ [ Dispatch needed — 7,000 L ]   [ Details ]                              │
 └──────────────────────────────────────────────────────────────────────────┘
 ┌─ Network 2 ──────────┐ ┌─ Forecast 12 ─────────┐ ┌─ Problems 1 ─────────┐
 │ Depots               │ │ Forecast              │ │ Anomalies            │
@@ -170,6 +175,7 @@ and nothing else: every guarantee below survives it.
 | Layer | Component | Shows | Backend source |
 | :--- | :--- | :--- | :--- |
 | **Status** | `StatusBar` | overall verdict, service level, disrupted routes, closed stations, dispatched count | `/api/metrics`, `/api/routes`, `/api/stations` |
+| **Control** | `AutopilotBar` | the autopilot's mode, its last decision, and the figures behind it | `/api/autopilot` |
 | **Action** | `ActionCard` | the plan headline, the why, the volume, the gate, the dispatch button | `/api/optimize` |
 | **Detail** | `DetailTabs` | Network, Forecast, Problems and System — one rendered at a time | every read endpoint |
 
@@ -290,7 +296,7 @@ already accounts for the measured `+1` arrival lag.
 ### The dispatch button takes two clicks
 
 ```
-[ Dispatch 7,000 L ]   →   [ Confirm — dispatch 7,000 L ]   [ Cancel ]
+[ Dispatch needed — 7,000 L ]   →   [ Confirm — dispatch 7,000 L ]   [ Cancel ]
 ```
 
 The first click **arms** the action and dispatches nothing. The second confirms.
@@ -301,14 +307,89 @@ say it twice.
 The volume on the button is the backend's own `total_litres` — the console does
 not recompute it.
 
-The plan is also split into what is written now and what is advisory:
+### The autopilot bar sits directly above the card it may act on
 
-- **`shipments_now`** — `dispatch_tick == now_tick`. Gated by the validator and
-  written on confirmation.
-- **`shipments_later`** — future ticks. Rendered under an explicit *"not
-  written now"* heading, because a plan for a future tick is a forecast, not an
-  order. The world will have moved by then; the backend recomputes it next
-  cycle.
+`AutopilotBar` is mounted between the status bar and the action card, so the
+autopilot's state is visible immediately above the card it can act on. It
+carries:
+
+- A two-way segmented control — **Manual / Autopilot**.
+- A state row: the mode, whether the loop is running, whether the last cycle
+  escalated, the last decision as a badge, and the cycle count.
+- The mode's one-line explanation, in plain words. `Autopilot` says *"dispatches
+  what the gate accepts"*; `Manual` says *"the system is not dispatching —
+  when there is something to dispatch, the card below asks you to."*
+- Any quarantine window and any error.
+
+The bar carries **no dispatch figures**. Those live on the card, where the
+dispatch happens — that is the merge: one place says the mode, one place says
+what was dispatched, and the card carries both because it knows the mode.
+
+**Every number on the card and the bar comes from the backend.** No figure is
+derived in the console, so `frontend/src/lib/derive.ts` and the
+no-invented-numbers allow-list are **unchanged** by this feature. The test
+`frontend/src/test/no-invented-numbers.test.tsx` failing would mean the test
+is working — and it now renders the card in *both* modes, so the autopilot's
+tick, litres and counts are held to the same contract.
+
+### The card is the dispatch surface, in both modes
+
+The manual dispatch and the autopilot were two separate panels. They are now
+one surface — the action card — plus the mode switch above it.
+
+**Autopilot off.** The system is not dispatching, so the card tells the
+operator there is work to do:
+
+| | |
+| :--- | :--- |
+| Button | `Dispatch needed — 7,000 L` |
+| Confirmation | the ordinary one |
+| Written? | only on the operator's confirmed click |
+
+**Autopilot live.** The system dispatches on its own, and the card shows what
+it dispatched:
+
+| | |
+| :--- | :--- |
+| Button | `Dispatch 7,000 L anyway` |
+| Confirmation | warns that the autopilot is live and may also dispatch on the same tick |
+| Headline | `Last dispatch: tick 61 · 4,200 L · created 1` |
+| In *Details* | `Last dispatch — by the autopilot`, with the per-shipment breakdown |
+
+### The manual button survives the autopilot
+
+The dispatch button is present in **both modes**, because a human must
+always be able to overrule the system. What changes is the *label*, not the
+availability:
+
+| Autopilot mode | Button label | Confirmation |
+| :--- | :--- | :--- |
+| `off` | `Dispatch needed — 7,000 L` | the ordinary one |
+| `live` | `Dispatch 7,000 L anyway` | warns that the autopilot is live and may also dispatch on the same tick |
+
+The two-click confirm is preserved in both cases. A manual dispatch on a tick
+the autopilot has already dispatched may be refused by the simulator's per-tick
+cap — the warning says so up front rather than letting the operator discover
+it as a confusing error.
+
+The button's behaviour when the autopilot is **unavailable** (no
+`/api/autopilot` response) is unchanged too: dispatch is the one thing the
+operator came to do, so losing the autopilot's state must not take the button
+with it.
+
+### The two dispatch streams never blur
+
+The card shows two dispatches, and it labels them apart:
+
+| Block | Whose dispatch |
+| :--- | :--- |
+| `Last dispatch — by you` (inside *Details*) | the operator's last manual dispatch |
+| `Last dispatch: tick 61 · 4,200 L · created 1` (headline) | the autopilot's last dispatch |
+
+Both come from the backend: the operator's from `POST /api/optimize/execute`'s
+response, the autopilot's from `GET /api/autopilot`. The autopilot's
+`last_shipments` is cleared by a cycle that dispatches nothing, so the card
+shows the most recent *real* dispatch rather than a stale one.
 
 ### The dispatch is a read-only plan until it is not
 
@@ -327,13 +408,14 @@ frontend/src/test/
 ├── format.test.ts             29   the formatting
 ├── panels.test.tsx            45   every panel, against real payloads
 ├── stream.test.ts              3   SSE is advisory; drop degrades; reconnect works
-├── no-invented-numbers.test.tsx 8   the central invariant
+├── no-invented-numbers.test.tsx 9   the central invariant
 ├── theme.test.ts               8   the toggle, the persistence, the fallbacks
+├── autopilot.test.tsx         17   the mode switch + the merged dispatch card
 ├── live.test.tsx               3   the same, against the running stack
 └── fixtures.ts                     real backend payloads, copied verbatim
 ```
 
-**136 passed, 3 skipped** (the live tests skip without `LIVE_BACKEND`).
+**154 passed, 3 skipped** (the live tests skip without `LIVE_BACKEND`).
 
 The fixtures are **copied verbatim from real backend responses** — not
 hand-written approximations. A test that passes against a made-up payload proves
@@ -454,6 +536,7 @@ frontend/
 │   ├── components/
 │   │   ├── common.tsx         Panel, Badge, Dot, Stat, Meter, Empty, ErrorBox
 │   │   ├── StatusBar.tsx      the slim top bar + the theme toggle
+│   │   ├── AutopilotBar.tsx   the mode control + the last decision
 │   │   ├── ActionCard.tsx     the hero: the plan, the why, the dispatch
 │   │   ├── DetailTabs.tsx     the tab strip, one panel at a time
 │   │   ├── Disclosure.tsx     the reusable expander

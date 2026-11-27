@@ -1,5 +1,6 @@
 /**
- * The action card — the one thing the operator came to do.
+ * The action card — the one thing the operator came to do, and the one
+ * surface that carries both dispatch modes.
  *
  * Everything else on this screen is secondary to this card. It answers, in
  * order:
@@ -9,6 +10,17 @@
  *   3. **Why?**               — the backend's own explanation, in its words.
  *   4. **Is it safe?**        — the gate's verdict, and the figures behind it.
  *   5. **Do it.**             — one button. Two clicks.
+ *
+ * **The card is the merged dispatch surface.** It knows the autopilot's mode,
+ * and it speaks for both:
+ *
+ *   - **Manual** — the button says `Dispatch needed — 7,000 L`. The system
+ *     tells the operator there is work to do; nothing is written until they
+ *     click.
+ *   - **Autopilot** — the system dispatches on its own, and the card shows
+ *     what it dispatched (`Last dispatch: tick 61 · 4,200 L · created 1`).
+ *     The button becomes `Dispatch 4,200 L anyway` — an override, because a
+ *     human must always be able to overrule an automatic decision.
  *
  * The panel's two rules survive the redesign unchanged:
  *
@@ -20,7 +32,12 @@
  */
 
 import { useState } from 'react'
-import type { ExecuteResponse, OptimizeResponse, PlannedShipment } from '../api/types'
+import type {
+  AutopilotStatus,
+  ExecuteResponse,
+  OptimizeResponse,
+  PlannedShipment,
+} from '../api/types'
 import { Badge, Empty, NumberChips } from './common'
 import { Disclosure } from './Disclosure'
 import { count, litres, percent, shortId, ticks } from '../lib/format'
@@ -64,6 +81,7 @@ export function ActionCard({
   execution,
   busy,
   error,
+  autopilot,
   onExecute,
   onRecompute,
 }: {
@@ -71,6 +89,13 @@ export function ActionCard({
   execution: ExecuteResponse | null
   busy: boolean
   error: string | null
+  /**
+   * The autopilot's state, when it is known.
+   *
+   * Optional on purpose: the card works without it, and the autopilot being
+   * unavailable must not take the manual dispatch button with it.
+   */
+  autopilot?: AutopilotStatus | null
   onExecute: () => void
   onRecompute: () => void
 }) {
@@ -84,6 +109,17 @@ export function ActionCard({
   const now = optimization?.shipments_now ?? []
   const later = optimization?.shipments_later ?? []
   const rejected = gated?.rejected ?? 0
+
+  // The autopilot being live changes what the button *means*, not whether it
+  // exists. The operator can always overrule an automatic decision; what
+  // changes is that the button says so, and the confirmation warns that the
+  // autopilot may also dispatch on this tick.
+  const autopilotLive = autopilot?.mode === 'live'
+
+  // What the system dispatched on its own last. Every field is the
+  // backend's — the console adds no arithmetic to them.
+  const autoShipments = autopilot?.last_shipments ?? []
+  const autoDispatched = autopilotLive && autoShipments.length > 0
 
   // The headline shipment is the one the operator is about to ship. It is
   // the backend's ordering (the optimiser's `sequence`), not a re-sort.
@@ -182,7 +218,9 @@ export function ActionCard({
               >
                 {now.length === 0
                   ? 'Nothing to dispatch'
-                  : `Dispatch ${litres(optimization?.total_litres ?? 0)} L`}
+                  : autopilotLive
+                    ? `Dispatch ${litres(optimization?.total_litres ?? 0)} L anyway`
+                    : `Dispatch needed — ${litres(optimization?.total_litres ?? 0)} L`}
               </button>
             )}
 
@@ -204,9 +242,32 @@ export function ActionCard({
 
           {confirming ? (
             <div className="hero__confirm">
-              This writes the current-tick shipments to the simulator. Future-tick shipments are
-              advisory and are never written early.
+              {autopilotLive ? (
+                <>
+                  The autopilot is live and may also dispatch on this tick. This writes the
+                  current-tick shipments to the simulator now; future-tick shipments are advisory
+                  and are never written early.
+                </>
+              ) : (
+                <>
+                  This writes the current-tick shipments to the simulator. Future-tick shipments
+                  are advisory and are never written early.
+                </>
+              )}
             </div>
+          ) : null}
+
+          {/*
+            * What the system dispatched on its own. This is the autopilot's
+            * stream, not the operator's — the operator's own last dispatch
+            * lives in the "Details" disclosure below, so the two never
+            * blur. Every figure is the backend's own.
+            */}
+          {autoDispatched && autopilot ? (
+            <p className="hero__auto">
+              Last dispatch: tick {count(autopilot.last_cycle_tick ?? 0)} ·{' '}
+              {litres(autopilot.last_litres)} L · created {count(autopilot.last_created)}
+            </p>
           ) : null}
 
           {/*
@@ -289,7 +350,7 @@ export function ActionCard({
             {execution ? (
               <>
                 <p className="section-label" style={{ marginTop: 20 }}>
-                  Last dispatch
+                  Last dispatch — by you
                 </p>
                 <div className="kv">
                   <span className="kv__key">Created</span>
@@ -307,6 +368,38 @@ export function ActionCard({
                   <span className="kv__key">Dispatched</span>
                   <span className="kv__value">{litres(execution.total_litres)} L</span>
                 </div>
+              </>
+            ) : null}
+
+            {autoDispatched && autopilot ? (
+              <>
+                <p className="section-label" style={{ marginTop: 20 }}>
+                  Last dispatch — by the autopilot
+                </p>
+                <div className="kv">
+                  <span className="kv__key">Tick</span>
+                  <span className="kv__value">{count(autopilot.last_cycle_tick ?? 0)}</span>
+                </div>
+                <div className="kv">
+                  <span className="kv__key">Created</span>
+                  <span className="kv__value">{count(autopilot.last_created)}</span>
+                </div>
+                <div className="kv">
+                  <span className="kv__key">Replayed</span>
+                  <span className="kv__value">{count(autopilot.last_replayed)}</span>
+                </div>
+                <div className="kv">
+                  <span className="kv__key">Dispatched</span>
+                  <span className="kv__value">{litres(autopilot.last_litres)} L</span>
+                </div>
+                {autoShipments.map((shipment, index) => (
+                  <div className="kv" key={shipment.idempotency_key ?? index}>
+                    <span className="kv__key">
+                      {shipment.fuel_type ?? 'shipment'} · {shortId(shipment.route_id ?? '')}
+                    </span>
+                    <span className="kv__value">{litres(Number(shipment.quantity ?? 0))} L</span>
+                  </div>
+                ))}
               </>
             ) : null}
           </Disclosure>

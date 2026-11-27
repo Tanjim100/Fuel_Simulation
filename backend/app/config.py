@@ -165,6 +165,32 @@ class Settings:
     #: laptop and absolute inside the image.
     scenario_path: str = "backend/scenarios/baseline.yaml"
 
+    # -- autopilot ----------------------------------------------------------- #
+    #: The mode the backend boots into: ``off`` | ``live``.
+    #:
+    #: ``off`` is the shipped default and the reason the feature is safe to
+    #: exist: ``docker compose up -d`` behaves exactly as it did before the
+    #: autopilot was written. The autopilot writes to the same simulator the
+    #: verifier suite asserts against, so it must be turned on deliberately.
+    autopilot_mode: str = "off"
+    #: Seconds between autopilot cycles.
+    #:
+    #: Sized against the simulator's tick interval (2s at the default
+    #: `SIMULATION_SPEED=0.5`): one cycle per tick. A faster cycle would
+    #: re-plan the same tick repeatedly.
+    autopilot_interval_seconds: float = 2.0
+    #: How many litres the autopilot may dispatch in one tick, normally.
+    autopilot_max_litres_per_tick: float = 12000.0
+    #: How many litres it may dispatch in one tick when anomalies escalate
+    #: the budget. Anomalies raise the ceiling; they never gate dispatch.
+    autopilot_max_litres_per_tick_escalated: float = 24000.0
+    #: The hard cap on allocations per cycle, in both budget tiers.
+    autopilot_max_shipments_per_tick: int = 8
+    #: How many ticks a failed tick is quarantined for. A simulator that
+    #: rejected a dispatch will reject the same one again; retrying every
+    #: two seconds would only spam the journal.
+    autopilot_reset_quarantine_ticks: int = 2
+
     # -- anomaly detection -------------------------------------------------- #
     #: How many ticks of history the detectors compare against.
     anomaly_history_window: int = 32
@@ -245,6 +271,20 @@ class Settings:
             ),
             anomaly_observation_log_max=_env_int(
                 "ANOMALY_OBSERVATION_LOG_MAX", 4096
+            ),
+            autopilot_mode=_env_str("AUTOPILOT_MODE", "off"),
+            autopilot_interval_seconds=_env_float("AUTOPILOT_INTERVAL_SECONDS", 2.0),
+            autopilot_max_litres_per_tick=_env_float(
+                "AUTOPILOT_MAX_LITRES_PER_TICK", 12000.0
+            ),
+            autopilot_max_litres_per_tick_escalated=_env_float(
+                "AUTOPILOT_MAX_LITRES_PER_TICK_ESCALATED", 24000.0
+            ),
+            autopilot_max_shipments_per_tick=_env_int(
+                "AUTOPILOT_MAX_SHIPMENTS_PER_TICK", 8
+            ),
+            autopilot_reset_quarantine_ticks=_env_int(
+                "AUTOPILOT_RESET_QUARANTINE_TICKS", 2
             ),
         )
 

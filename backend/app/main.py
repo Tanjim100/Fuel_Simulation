@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from .anomaly import AnomalyConfig, AnomalyDetector
+from .autopilot import AutopilotController
 from .broker import EventBroker
 from .circuit_breaker import BreakerState, CircuitBreaker
 from .config import Settings, get_settings
@@ -45,6 +46,7 @@ from .metrics import (
 )
 from .routers import allocations as allocations_router
 from .routers import anomaly as anomaly_router
+from .routers import autopilot as autopilot_router
 from .routers import dlq as dlq_router
 from .routers import events as events_router
 from .routers import forecast as forecast_router
@@ -189,10 +191,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await broker.start()
     await broker.refresh_snapshot()
 
+    # One lock for every write to the simulator. The autopilot and the
+    # operator's "Dispatch" button both take it, so an automatic dispatch
+    # and a manual one can never interleave -- which is a structural
+    # property, not a convention.
+    app.state.dispatch_lock = asyncio.Lock()
+
+    # The autopilot. It is created after the broker and the journal because
+    # it needs both, and it starts *after* the first snapshot so its first
+    # cycle sees a populated world.
+    autopilot = AutopilotController(
+        client=breaker,
+        broker=broker,
+        journal=journal,
+        settings=settings,
+        dispatch_lock=app.state.dispatch_lock,
+    )
+    app.state.autopilot = autopilot
+    await autopilot.start()
+
     try:
         yield
     finally:
         LOGGER.info("Shutting down backend")
+        await autopilot.stop()
         await broker.stop()
         if journal is not None:
             journal.close()
@@ -284,6 +306,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(anomaly_router.router)
     app.include_router(forecast_router.router)
     app.include_router(dlq_router.router)
+    app.include_router(autopilot_router.router)
 
     @app.get("/", tags=["meta"])
     async def root() -> dict[str, Any]:
@@ -320,6 +343,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "GET  /api/forecast/validate",
                 "GET  /api/observability",
                 "GET  /api/dlq, /api/dlq/{id}/retry",
+                "GET  /api/autopilot",
+                "POST /api/autopilot/mode, /api/autopilot/cycle",
                 "GET  /metrics  (Prometheus exposition)",
             ],
         }

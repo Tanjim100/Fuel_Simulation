@@ -131,7 +131,7 @@ then."* That is the entire approval step.
 
 **2. The human verified by asking for reports, not by reading diffs.** Every
 day ended with a request for a status update. The assistant produced
-`regular_updates/Day_1.md` … `Day_6.md`. The human's *"give me in line so
+`regular_updates/Day_1.md` … `Day_7.md`. The human's *"give me in line so
 that i can update my senior"* shows the real audience was a **senior
 engineer who never opened the code**.
 
@@ -330,7 +330,7 @@ It was sent once, and the assistant had to ask where the file should go:
 > about what is done till now and what are the targets to fullfill."**
 
 **This is the daily reporting ritual, and it continued for six days.** It
-created `regular_updates/Day_1.md` … `Day_6.md` — the artefacts that a
+created `regular_updates/Day_1.md` … `Day_7.md` — the artefacts that a
 senior engineer actually reads.
 
 ### The pivot prompt
@@ -477,7 +477,7 @@ And the reports that followed:
 
 This is worth quoting in context. The human needed to brief a senior who
 would never open the code. That single line shaped the entire documentation
-strategy: `Day_1.md` … `Day_6.md`, `docs/OBSERVABILITY.md`,
+strategy: `Day_1.md` … `Day_7.md`, `docs/OBSERVABILITY.md`,
 `docs/LOAD_TEST.md`, `docs/RESILIENCE.md`, `docs/ARCHITECTURE.md`,
 `docs/DEMO.md`, `docs/SCENARIO.md`.
 
@@ -758,7 +758,7 @@ things down.
 ## See also
 
 - `PLATFORM.md` — the single-document guide to the whole system
-- `regular_updates/Day_1.md` … `Day_6.md` — the daily reports
+- `regular_updates/Day_1.md` … `Day_7.md` — the daily reports
 - `docs/BACKEND.md` — the endpoints, in detail
 - `docs/ARCHITECTURE.md` — the as-built architecture
 - `docs/RESILIENCE.md` — the breaker and degraded mode

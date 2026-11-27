@@ -23,6 +23,7 @@
 import { useMemo } from 'react'
 import { ActionCard } from './components/ActionCard'
 import { AnomalyPanel, IncidentPanel } from './components/AnomalyPanel'
+import { AutopilotBar } from './components/AutopilotBar'
 import { DetailTabs } from './components/DetailTabs'
 import type { TabDefinition } from './components/DetailTabs'
 import { ForecastPanel } from './components/ForecastPanel'
@@ -110,11 +111,25 @@ export default function App() {
       {data.error ? <ErrorBox message={`Backend unreachable — ${data.error}`} /> : null}
 
       <main className="main">
+        {/*
+          * The autopilot's switch sits directly above the Action Card,
+          * because the card is the dispatch surface for both modes: manual
+          * it asks you to dispatch, automatic it shows what the system
+          * dispatched and offers `Dispatch … anyway`.
+          */}
+        <AutopilotBar
+          autopilot={data.autopilot}
+          busy={data.autopilotBusy}
+          error={data.autopilotError}
+          onChange={(mode) => void data.setAutopilotMode(mode)}
+        />
+
         <ActionCard
           plan={data.plan}
           execution={data.execution}
           busy={data.executeBusy || data.planBusy}
           error={data.actionError}
+          autopilot={data.autopilot}
           onExecute={() => void data.execute()}
           onRecompute={() => void data.recompute()}
         />

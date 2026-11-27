@@ -13,7 +13,7 @@ Companion to `BRIEF.md` and `ARCHITECTURE.md`.
 > **Why a rewrite and not an edit.** A judge opening a design document that
 > does not match the running product reads it as a broken submission. The
 > original design has value only as history, and the history is recorded in
-> `regular_updates/Day_1.md` … `Day_6.md` and in git.
+> `regular_updates/Day_1.md` … `Day_7.md` and in git.
 
 ---
 

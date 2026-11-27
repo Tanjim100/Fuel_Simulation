@@ -9,6 +9,8 @@
 
 import type {
   Anomaly,
+  AutopilotMode,
+  AutopilotStatus,
   BrokerHealth,
   Depot,
   ExecuteResponse,
@@ -132,5 +134,24 @@ export const api = {
     request<ExecuteResponse>('/api/optimize/execute', {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+
+  /**
+   * The autopilot's state. Read-only: the autopilot's mode is the backend's
+   * business, and the console merely shows it.
+   */
+  autopilot: () => request<AutopilotStatus>('/api/autopilot'),
+
+  /**
+   * Switch the autopilot's mode.
+   *
+   * The backend answers 400 for an unknown mode rather than clamping it, so
+   * a typo can never leave the console believing the autopilot is running
+   * when it is not.
+   */
+  setAutopilotMode: (mode: AutopilotMode) =>
+    request<AutopilotStatus>('/api/autopilot/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
     }),
 }

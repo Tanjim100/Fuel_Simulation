@@ -495,7 +495,27 @@ SHORTAGE_ALERTS = REGISTRY.counter(
 )
 DECISIONS = REGISTRY.counter(
     "backend_decisions_total",
-    "Operator decisions taken, by kind (plan, dispatch, cancel).",
+    "Operator decisions taken, by kind (plan, dispatch, cancel, autopilot).",
+)
+AUTOPILOT_ENABLED = REGISTRY.gauge(
+    "backend_autopilot_enabled",
+    "1 when the autopilot is in a mode other than off, 0 otherwise.",
+)
+AUTOPILOT_MODE = REGISTRY.gauge(
+    "backend_autopilot_mode",
+    "The autopilot's mode: 0=off, 1=live.",
+)
+AUTOPILOT_CYCLES = REGISTRY.counter(
+    "backend_autopilot_cycles_total",
+    "Autopilot cycles run, by outcome.",
+)
+AUTOPILOT_DISPATCHES = REGISTRY.counter(
+    "backend_autopilot_dispatches_total",
+    "Allocations the autopilot attempted, by outcome (created, replayed, failed).",
+)
+AUTOPILOT_LITRES = REGISTRY.counter(
+    "backend_autopilot_litres_total",
+    "Cumulative litres the autopilot has dispatched.",
 )
 FALLBACK_ACTIVATIONS = REGISTRY.counter(
     "backend_fallback_activations_total",
@@ -666,6 +686,11 @@ METRIC_FAMILIES: dict[str, tuple[str, ...]] = {
         "backend_shortage_alerts_total",
         "backend_decisions_total",
         "backend_fallback_activations_total",
+        "backend_autopilot_enabled",
+        "backend_autopilot_mode",
+        "backend_autopilot_cycles_total",
+        "backend_autopilot_dispatches_total",
+        "backend_autopilot_litres_total",
     ),
     "resilience": (
         "backend_circuit_state",
@@ -703,8 +728,17 @@ def _pre_register() -> None:
         SHORTAGE_ALERTS.register(severity=severity)
         INCIDENTS.register(severity=severity)
 
-    for kind in ("plan", "dispatch", "cancel"):
+    for kind in ("plan", "dispatch", "cancel", "autopilot"):
         DECISIONS.register(kind=kind)
+
+    for outcome in (
+        "dispatched", "no_demand", "gated", "breaker_open",
+        "quarantined", "tick_regressed", "error", "off",
+    ):
+        AUTOPILOT_CYCLES.register(outcome=outcome)
+
+    for outcome in ("created", "replayed", "failed"):
+        AUTOPILOT_DISPATCHES.register(outcome=outcome)
 
     for kind in (
         "degraded_mode", "poll_fallback", "breaker_open", "forecast_fallback",
@@ -731,6 +765,8 @@ def _pre_register() -> None:
     SIMULATOR_QUEUE_DEPTH.set(0)
     SNAPSHOT_AGE.set(0)
     DLQ_SIZE.set(0)
+    AUTOPILOT_ENABLED.set(0)
+    AUTOPILOT_MODE.set(0)
 
 
 _pre_register()

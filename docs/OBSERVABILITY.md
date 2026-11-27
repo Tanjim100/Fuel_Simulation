@@ -150,7 +150,12 @@ This is the layer that would have caught the pool wedge.
 | `backend_forecast_abs_error_litres` | histogram | — | The forecast's error against the live oracle. |
 | `backend_forecast_validation_total` | counter | `verdict` | `EXACT` / `MISMATCH` / `UNAVAILABLE`. |
 | `backend_shortage_alerts_total` | counter | `severity` | Stockout risks raised, by severity. |
-| `backend_decisions_total` | counter | `kind` | `plan` / `dispatch` / `cancel`. |
+| `backend_decisions_total` | counter | `kind` | `plan` / `dispatch` / `cancel` / `autopilot`. |
+| `backend_autopilot_enabled` | gauge | — | `1` when the autopilot's mode is not `off`. |
+| `backend_autopilot_mode` | gauge | — | `0`=off, `1`=live. |
+| `backend_autopilot_cycles_total` | counter | `outcome` | Autopilot cycles run, by outcome. |
+| `backend_autopilot_dispatches_total` | counter | `outcome` | Allocations the autopilot attempted: `created` / `replayed` / `failed`. |
+| `backend_autopilot_litres_total` | counter | — | Cumulative litres the autopilot has dispatched. |
 | `backend_fallback_activations_total` | counter | `kind` | `degraded_mode` / `poll_fallback` / `breaker_open` / `forecast_fallback`. |
 | `backend_anomalies_total` | counter | `kind`, `severity` | Anomalies detected. |
 | `backend_incidents_total` | counter | `severity` | Incidents opened from grouped anomalies. |
@@ -159,9 +164,33 @@ This is the layer that would have caught the pool wedge.
 counted whether it was accepted or rejected — a run of rejections is itself
 a finding.
 
+**On `kind="autopilot"`.** The autopilot's dispatches are counted under their
+own label value, separate from `kind="dispatch"`. An autopilot decision is a
+decision the operator **did not** make, and folding the two together would
+make the human-decision counter dishonest — which matters because PDF §15
+asks for *decision frequency*, which is only meaningful if the two are told
+apart.
+
+**On the autopilot's cycle outcomes.** The label set is
+`dispatched` / `no_demand` / `gated` / `breaker_open` /
+`quarantined` / `tick_regressed` / `error`, and every one of them is
+pre-registered at zero. A counter that has never been touched renders as
+*absent*, and absent is indistinguishable from uninstrumented — a dashboard
+would show a gap rather than a "0".
+
+**On reading `tick_regressed`.** It counts a tick the autopilot *refused* to
+dispatch on because the tick was already spent. It is **not** a sign of a
+faulty world — a rewound tick (a simulator reset) clears the guard instead of
+being counted here, so a rising `tick_regressed` means the autopilot is
+correctly declining to write twice on the same tick.
+
 **On `backend_fallback_activations_total`.** PDF §15 names it explicitly. A
 non-zero count is **not** an error: it is the record of the system choosing
 to serve a degraded answer rather than no answer at all.
+
+> The autopilot is **not** a fallback, and `backend_fallback_activations_total`
+> is deliberately untouched by it. The autopilot is a mode the operator turns
+> on, not a path the system degrades into.
 
 **On the three "detected" counters.** `backend_shortage_alerts_total`,
 `backend_anomalies_total` and `backend_incidents_total` count each finding
@@ -443,7 +472,7 @@ curl -s http://localhost:8002/api/observability | python3 -m json.tool
 # The health table.
 curl -s http://localhost:8002/api/health | python3 -m json.tool
 
-# The self-check: 46 assertions covering every §15 layer, the §16 table,
+# The self-check: 51 assertions covering every §15 layer, the §16 table,
 # the content type, and the label sets.
 ./scripts/check_observability.py
 
