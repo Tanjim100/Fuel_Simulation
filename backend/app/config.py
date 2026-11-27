@@ -89,13 +89,16 @@ class Settings:
 
     # -- SSE broker --------------------------------------------------------- #
     #: Seconds without an SSE event while the world has advanced -> suspected drop.
-    sse_stale_after: float = 45.0
+    #:
+    #: Sized against the simulator's tick interval (2s at the default
+    #: `SIMULATION_SPEED=0.5`): ~4 ticks of slack before a drop is suspected.
+    sse_stale_after: float = 9.0
     #: Seconds of poller-only operation before we try to reclaim SSE.
     sse_recover_after: float = 10.0
     #: How often the watchdog samples the tick counter.
-    watchdog_interval: float = 5.0
+    watchdog_interval: float = 1.0
     #: How often the poller reconciles world state (also the poll-only mode rate).
-    poll_interval: float = 5.0
+    poll_interval: float = 1.0
     #: Force a fresh SSE subscription after this long, bounding the blast radius
     #: of an undetected drop.
     sse_max_lifetime: float = 900.0
@@ -120,7 +123,8 @@ class Settings:
     #: as the last poll, so a TTL below the poll interval marks a healthy
     #: world stale for most of every poll cycle -- which is exactly the
     #: false "Stale data" banner this pair was tuned to avoid.
-    state_max_age: float = 15.0
+    #: 3s = three poll intervals of slack.
+    state_max_age: float = 3.0
     #: How often the snapshot refresher pulls fresh world state.
     state_refresh_interval: float = 1.0
 
@@ -195,15 +199,15 @@ class Settings:
             breaker_failure_threshold=_env_int("BREAKER_FAILURE_THRESHOLD", 5),
             breaker_cooldown_seconds=_env_float("BREAKER_COOLDOWN_SECONDS", 15.0),
             breaker_enabled=_env_bool("BREAKER_ENABLED", True),
-            sse_stale_after=_env_float("SSE_STALE_AFTER", 45.0),
+            sse_stale_after=_env_float("SSE_STALE_AFTER", 9.0),
             sse_recover_after=_env_float("SSE_RECOVER_AFTER", 10.0),
-            watchdog_interval=_env_float("WATCHDOG_INTERVAL", 5.0),
-            poll_interval=_env_float("POLL_INTERVAL", 5.0),
+            watchdog_interval=_env_float("WATCHDOG_INTERVAL", 1.0),
+            poll_interval=_env_float("POLL_INTERVAL", 1.0),
             sse_max_lifetime=_env_float("SSE_MAX_LIFETIME", 900.0),
             event_buffer=_env_int("EVENT_BUFFER", 200),
             subscriber_queue=_env_int("SUBSCRIBER_QUEUE", 64),
             fetch_concurrency=_env_int("FETCH_CONCURRENCY", 4),
-            state_max_age=_env_float("STATE_MAX_AGE", 15.0),
+            state_max_age=_env_float("STATE_MAX_AGE", 3.0),
             state_refresh_interval=_env_float("STATE_REFRESH_INTERVAL", 1.0),
             journal_path=_env_str("JOURNAL_PATH", "/app/data/journal.sqlite3"),
             dlq_path=_env_str("DLQ_PATH", "/app/data/dlq.sqlite3"),

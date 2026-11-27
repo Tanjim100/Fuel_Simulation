@@ -616,7 +616,7 @@ notice shows a stale world as if it were live.
   (64). A subscriber whose queue is full has its events **dropped and
   counted** (`backend_sse_events_dropped_total`), never silently discarded.
 - A **watchdog** samples every 5 s. If no event arrives while the world has
-  advanced for longer than `SSE_STALE_AFTER` (45 s), that is a **suspected
+  advanced for longer than `SSE_STALE_AFTER` (9 s), that is a **suspected
   drop** — counted, and the broker **falls back to polling**.
 - After `SSE_RECOVER_AFTER` (10 s) of poll-only operation, the broker tries to
   reclaim SSE.
@@ -1132,15 +1132,16 @@ afterwards, so the next slow run is diagnosable rather than mysterious.
 | Env var | Default | What it does |
 | :--- | :--- | :--- |
 | `SIMULATOR_BASE_URL` | `http://simulator-api:8000` | The upstream. |
+| `SIMULATION_SPEED` | `0.5` | Simulator ticks per second → a **2-second tick**. `0.1` is the slowest the simulator can go (a 10s tick); the runner sleeps `max(0.05, 1.0 / max(0.1, speed))`. **Changing this means re-tuning `POLL_INTERVAL`, `STATE_MAX_AGE` and `SSE_STALE_AFTER`** — see `docs/TESTING.md` §3.6. |
 | `REQUEST_TIMEOUT` | `3.0` | Per-request timeout, seconds. |
 | `MAX_RETRIES` | `3` | Retry attempts (→ 4 total tries). |
 | `BREAKER_FAILURE_THRESHOLD` | `5` | Consecutive retryable failures before OPEN. |
 | `BREAKER_COOLDOWN_SECONDS` | `15.0` | OPEN → HALF_OPEN probe delay. |
 | `BREAKER_ENABLED` | `true` | Disable the breaker (it still counts). |
 | `FETCH_CONCURRENCY` | `4` | Concurrent world reads. **Do not raise past 4** — each simulator request holds 2 connections against a 15-wide pool. |
-| `STATE_MAX_AGE` | `15.0` | Snapshot TTL. **Must exceed `POLL_INTERVAL`** — this is exactly the bug that produced a red "Stale data" banner on a perfectly healthy system. |
-| `POLL_INTERVAL` | `5.0` | The poller's reconcile rate. |
-| `SSE_STALE_AFTER` | `45.0` | No event + world advanced → suspected drop. |
+| `STATE_MAX_AGE` | `3.0` | Snapshot TTL. **Must exceed `POLL_INTERVAL`** — this is exactly the bug that produced a red "Stale data" banner on a perfectly healthy system. |
+| `POLL_INTERVAL` | `1.0` | The poller's reconcile rate. |
+| `SSE_STALE_AFTER` | `9.0` | No event + world advanced → suspected drop. |
 | `SSE_RECOVER_AFTER` | `10.0` | Poll-only seconds before reclaiming SSE. |
 | `SSE_MAX_LIFETIME` | `900.0` | Forced fresh SSE subscription. |
 | `SUBSCRIBER_QUEUE` | `64` | Per-dashboard queue depth. |

@@ -457,12 +457,12 @@ never affected; under a bare `uvicorn` the bug was structurally guaranteed.
 | `SIMULATOR_BASE_URL` | `http://simulator-api:8000` | Upstream base URL |
 | `REDIS_URL` | `redis://redis:6379/0` | Cache / stale invalidation |
 | `BACKEND_PORT` | `8002` | Listen port |
-| `SSE_STALE_AFTER` | `45` | Seconds of silence while the world advances before a drop is suspected. Must exceed the simulator's 10s tick interval with slack — events arrive once per tick. |
+| `SSE_STALE_AFTER` | `9` | Seconds of silence while the world advances before a drop is suspected. Must exceed the simulator's 2s tick interval with slack — events arrive once per tick. 9s is ~4 ticks. |
 | `SSE_RECOVER_AFTER` | `10` | Seconds of poller-only operation before reclaiming SSE |
-| `POLL_INTERVAL` | `5` | REST reconciliation interval (seconds). Half the 10s tick interval — polling faster just re-reads the same snapshot. |
-| `WATCHDOG_INTERVAL` | `5` | Tick-progress watchdog interval (seconds) |
+| `POLL_INTERVAL` | `1` | REST reconciliation interval (seconds). Half the 2s tick interval — polling faster just re-reads the same snapshot. |
+| `WATCHDOG_INTERVAL` | `1` | Tick-progress watchdog interval (seconds) |
 | `SSE_MAX_LIFETIME` | `900` | Force a fresh subscription after this long (seconds) |
-| `STATE_MAX_AGE` | `15` | Snapshot TTL (seconds). **Must exceed `POLL_INTERVAL`** — a snapshot can only ever be as fresh as the poll that captured it, so a threshold below the poll interval marks a healthy world stale for most of every poll cycle, and the console renders a red "Stale data" banner on a system that is working fine. 15s is three poll intervals of slack. |
+| `STATE_MAX_AGE` | `3` | Snapshot TTL (seconds). **Must exceed `POLL_INTERVAL`** — a snapshot can only ever be as fresh as the poll that captured it, so a threshold below the poll interval marks a healthy world stale for most of every poll cycle, and the console renders a red "Stale data" banner on a system that is working fine. 3s is three poll intervals of slack. |
 | `EVENT_BUFFER` | `200` | Retained events for `/api/events/recent` |
 | `SUBSCRIBER_QUEUE` | `64` | Per-subscriber queue depth |
 | `JOURNAL_PATH` | `/app/data/journal.sqlite3` | Write-ahead journal location |
@@ -1022,10 +1022,10 @@ All use the existing `_env_*` helpers and the `Settings.from_env()` pattern.
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
-| `POLL_INTERVAL` | `5.0` | Seconds between poll-only reconciliation cycles |
-| `WATCHDOG_INTERVAL` | `5.0` | How often the watchdog samples the tick counter |
+| `POLL_INTERVAL` | `1.0` | Seconds between poll-only reconciliation cycles |
+| `WATCHDOG_INTERVAL` | `1.0` | How often the watchdog samples the tick counter |
 | `SSE_MAX_LIFETIME` | `900.0` | Seconds before an SSE subscription is force-recycled |
-| `SSE_STALE_AFTER` | `45.0` | Silence after which the stream is suspected dead |
+| `SSE_STALE_AFTER` | `9.0` | Silence after which the stream is suspected dead |
 | `FETCH_CONCURRENCY` | `4` | **World reads in flight against the simulator at once** |
 
 `FETCH_CONCURRENCY` is the setting that keeps the simulator alive. See §18.

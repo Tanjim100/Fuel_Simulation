@@ -448,7 +448,7 @@ evidence of a drop. `suspected_drops` stayed at 0 — correctly. The watchdog
 (`broker.py`) requires **both** conditions:
 
 1. the tick advanced, and
-2. silence exceeded `SSE_STALE_AFTER` (45s).
+2. silence exceeded `SSE_STALE_AFTER` (9s).
 
 A stream that is still delivering events fails neither. The fault only becomes
 visible at the next **reconnect** attempt, which returns 503.
@@ -458,22 +458,23 @@ that, the transport has to actually go silent while the world keeps moving —
 which is what `unavailable` approximates, and what the watchdog's tick-progress
 check exists to catch.
 
-### 3.6 The watchdog, and the 10-second floor
+### 3.6 The watchdog, and the tick interval
 
 ```bash
 curl -s http://localhost:8002/api/stream-health
 ```
 
-The broker's watchdog samples `/v1/instance` every `WATCHDOG_INTERVAL` (5s) and
+The broker's watchdog samples `/v1/instance` every `WATCHDOG_INTERVAL` (1s) and
 compares the tick to the last one it saw. Events arrive **once per tick**, and
-a tick is **10 real seconds** — the simulator's runner sleeps
-`max(0.05, 1.0 / max(0.1, speed))`, and that inner `max(0.1, ...)` floors the
-interval at 10s no matter how small `SIMULATION_SPEED` is.
+a tick is **2 real seconds** — the simulator's runner sleeps
+`max(0.05, 1.0 / max(0.1, speed))`, and the default `SIMULATION_SPEED=0.5`
+gives a 2s tick. (That inner `max(0.1, ...)` is the floor: the slowest
+reachable speed is `0.1`, a 10s tick.)
 
-This is why `SSE_STALE_AFTER` is **45 seconds**, not 20. A threshold near the
+This is why `SSE_STALE_AFTER` is **9 seconds**, not 4. A threshold near the
 tick period would fire on a *healthy* but slow world and report a drop that
 never happened. The threshold must exceed the tick interval with slack —
-45s is about 4 ticks.
+9s is about 4 ticks.
 
 If you change `SIMULATION_SPEED`, re-check `SSE_STALE_AFTER` and
 `POLL_INTERVAL` together. A mismatch in the other direction makes a healthy
@@ -486,7 +487,7 @@ an awkward constraint that is easy to get wrong:
 
 > **The snapshot can only ever be as fresh as the poll that captured it.**
 
-The backend refreshes its snapshot every `POLL_INTERVAL` (5s). If
+The backend refreshes its snapshot every `POLL_INTERVAL` (1s). If
 `STATE_MAX_AGE` is *below* that, the snapshot is flagged stale for most of
 every poll cycle — and the console, faithfully, renders a red **"Stale data"**
 banner on a system that is working perfectly.
@@ -496,7 +497,8 @@ This is not hypothetical. It is exactly what this project shipped for a while:
 **80% of the time** on a healthy stack. Sampling `/api/stream-health` ten
 times in a row showed `is_stale` true on eight of them.
 
-The fix is `STATE_MAX_AGE = 15` — three poll intervals of slack. The
+The fix is `STATE_MAX_AGE = 3` — three poll intervals of slack. (It was 15
+when `POLL_INTERVAL` was 5; the ratio is what matters, not the number.) The
 correctness rule is simple:
 
 > **`STATE_MAX_AGE` must be greater than `POLL_INTERVAL`.**

@@ -154,6 +154,16 @@ a read serves the cached snapshot, and only *triggers* a refresh when the
 snapshot has aged past `STATE_MAX_AGE` (15 s, against a `POLL_INTERVAL` of 5
 s).
 
+> **These three runs were recorded at a 10-second tick**
+> (`SIMULATION_SPEED=0.1`). The stack now runs at a **2-second tick**
+> (`SIMULATION_SPEED=0.5`), with `POLL_INTERVAL=1`, `STATE_MAX_AGE=3` and
+> `SSE_STALE_AFTER=9` re-tuned to match. The *shape* of the result is
+> unchanged — the decision path still saturates the pool on its own account
+> while the read paths never touch it — but the absolute read counts in the
+> table below are from the 10s-tick runs and are **not** re-measured here.
+> See `docs/TESTING.md` §3.6 for the coupling between tick rate and the
+> backend's thresholds.
+
 **Measured, not assumed.** Counting the simulator's `/v1/stations` requests
 in the backend's log:
 
